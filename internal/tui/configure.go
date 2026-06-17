@@ -35,12 +35,13 @@ type configureState struct {
 	from    screenID // screen to return to
 }
 
-// contextChoices steps the context in 8k increments (0 = model default).
+// contextChoices steps the context in 4k increments (0 = model default).
+// Small steps matter when VRAM is tight — each 4k of KV cache is real memory.
 var contextChoices = buildContextChoices()
 
 func buildContextChoices() []int {
 	c := []int{0}
-	for k := 8192; k <= 131072; k += 8192 {
+	for k := 4096; k <= 131072; k += 4096 {
 		c = append(c, k)
 	}
 	return c
@@ -135,8 +136,9 @@ func (m *Model) adjustField(dir int) {
 		i = clamp(i+dir, 0, len(contextChoices)-1)
 		c.context = contextChoices[i]
 	case fldNumGPU:
-		i := indexInt(numGPUChoices, c.numGPU)
-		c.numGPU = numGPUChoices[clamp(i+dir, 0, len(numGPUChoices)-1)]
+		choices := m.gpuChoices(c.tag)
+		i := indexInt(choices, c.numGPU)
+		c.numGPU = choices[clamp(i+dir, 0, len(choices)-1)]
 	}
 }
 

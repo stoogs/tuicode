@@ -4,67 +4,57 @@ import (
 	"sort"
 
 	"tuicode/internal/hw"
+	"tuicode/internal/store"
 )
 
-// catalogModel is a popular Ollama model offered on the pull screen.
-type catalogModel struct {
-	Tag     string
-	ParamsB float64 // parameter count in billions (for the Q4_K_M fit estimate)
-	Note    string  // short descriptor
-}
-
-// trendingCatalog is a curated set of popular, tool-capable models on Ollama
-// (OpenCode needs tool support, so non-tool models like gemma3 are omitted).
-// Roughly ordered by popularity. Footprints are estimated at Q4_K_M.
-var trendingCatalog = []catalogModel{
-	{"qwen3:4b", 4, "general · fast"},
-	{"qwen3:8b", 8, "general"},
-	{"qwen3:14b", 14, "general"},
-	{"qwen3:30b-a3b", 30, "MoE · fast"},
-	{"qwen2.5-coder:1.5b", 1.5, "coding · tiny"},
-	{"qwen2.5-coder:3b", 3, "coding"},
-	{"qwen2.5-coder:7b", 7, "coding"},
-	{"qwen2.5-coder:14b", 14, "coding"},
-	{"qwen2.5-coder:32b", 32, "coding · strong"},
-	{"qwen3-coder:30b", 30, "coding · agentic"},
-	{"llama3.2:1b", 1, "tiny starter"},
-	{"llama3.2:3b", 3, "general · fast"},
-	{"llama3.1:8b", 8, "general"},
-	{"mistral:7b", 7, "general"},
-	{"mistral-nemo:12b", 12, "general · 128k"},
-	{"devstral:24b", 24, "coding · agentic"},
-	{"phi4:14b", 14, "reasoning"},
-	{"deepseek-r1:7b", 7, "reasoning"},
-	{"deepseek-r1:8b", 8, "reasoning"},
-	{"deepseek-r1:14b", 14, "reasoning"},
-	{"deepseek-r1:32b", 32, "reasoning · strong"},
-}
-
-// catalogEntry is a catalog model with its computed fit for the current memory.
+// catalogEntry is a trending model with its computed fit for the current memory.
 type catalogEntry struct {
-	catalogModel
-	EstGB float64
-	Fits  bool
+	store.TrendingModel
+	EstGB   float64
+	Fits    bool // runnable: fits in system RAM (possibly via a CPU/GPU split)
+	VRAMFit bool // fits entirely in VRAM (runs fully on the GPU — fastest)
 }
 
-// fittingModels returns up to `limit` catalog models that fit in the
-// authoritative memory pool at Q4_K_M (weights + a nominal context), preferring
-// the largest that still fit (more capable) then smaller ones. When memory is
-// unknown it returns the first `limit` entries unfiltered.
-func fittingModels(det hw.Detection, limit int) []catalogEntry {
-	mem := det.Authoritative()
-	totalGB := float64(mem.Total) / gib
-	reserveGB := float64(det.Reserve()) / gib
+// runCeilingGB is the memory a model can occupy and still run: system RAM, since
+// Ollama offloads to RAM whatever doesn't fit in VRAM (a CPU/GPU split). VRAM
+// alone is too strict — it would hide models that run fine, just slower.
+func runCeilingGB(det hw.Detection) float64 {
+	if det.RAM.Total > 0 {
+		return float64(det.RAM.Total) / gib
+	}
+	return float64(det.Authoritative().Total) / gib
+}
 
-	entries := make([]catalogEntry, 0, len(trendingCatalog))
-	for _, c := range trendingCatalog {
+func vramGB(det hw.Detection) float64 {
+	if det.GPU != nil {
+		return float64(det.GPU.Total) / gib
+	}
+	return 0
+}
+
+// fittingModels returns up to `limit` trending models that can run on this
+// machine — i.e. fit in system RAM at Q4_K_M (weights + a nominal context),
+// possibly via a CPU/GPU split — largest first. Entries that don't fit entirely
+// in VRAM are kept (they run on a split) and flagged VRAMFit=false. When memory
+// is unknown the first `limit` entries are returned unfiltered (preserving the
+// popularity ordering from the daily refresh).
+func fittingModels(trending []store.TrendingModel, det hw.Detection, limit int) []catalogEntry {
+	ceil := runCeilingGB(det)
+	reserveGB := float64(det.Reserve()) / gib
+	vram := vramGB(det)
+
+	entries := make([]catalogEntry, 0, len(trending))
+	for _, c := range trending {
 		u := hw.EstimateUsage(c.ParamsB, "Q4_K_M", 8192, 0)
-		fits := totalGB <= 0 || u.TotalGB+reserveGB <= totalGB
-		entries = append(entries, catalogEntry{catalogModel: c, EstGB: u.TotalGB, Fits: fits})
+		fits := ceil <= 0 || u.TotalGB+reserveGB <= ceil
+		entries = append(entries, catalogEntry{
+			TrendingModel: c, EstGB: u.TotalGB, Fits: fits,
+			VRAMFit: vram <= 0 || u.TotalGB+reserveGB <= vram,
+		})
 	}
 
-	// Keep only fitting models when memory is known.
-	if totalGB > 0 {
+	// Keep only runnable models when memory is known.
+	if ceil > 0 {
 		kept := entries[:0:0]
 		for _, e := range entries {
 			if e.Fits {
@@ -72,7 +62,7 @@ func fittingModels(det hw.Detection, limit int) []catalogEntry {
 			}
 		}
 		entries = kept
-		// Largest-that-fits first (most capable), then by name for stability.
+		// Largest-that-runs first (most capable), then by name for stability.
 		sort.SliceStable(entries, func(i, j int) bool {
 			if entries[i].ParamsB != entries[j].ParamsB {
 				return entries[i].ParamsB > entries[j].ParamsB
@@ -85,4 +75,77 @@ func fittingModels(det hw.Detection, limit int) []catalogEntry {
 		entries = entries[:limit]
 	}
 	return entries
+}
+
+// recEntry is a benchmark-reference model with its fit for the current memory.
+type recEntry struct {
+	store.RecModel
+	Fits bool
+}
+
+// fittingRecommended returns the benchmark-reference models that can run on this
+// machine — fitting in system RAM (the benchmark's own mem_gb footprint covers
+// the CPU/GPU split), fastest-likely first (more on GPU ⇒ higher gpu_percent ⇒
+// generally faster). When memory is unknown, all are returned in file order.
+func fittingRecommended(rec store.Recommended, det hw.Detection, limit int) []recEntry {
+	totalGB := runCeilingGB(det)
+	reserveGB := float64(det.Reserve()) / gib
+
+	entries := make([]recEntry, 0, len(rec.Models))
+	for _, r := range rec.Models {
+		fits := totalGB <= 0 || r.MemGB+reserveGB <= totalGB
+		if totalGB > 0 && !fits {
+			continue
+		}
+		entries = append(entries, recEntry{RecModel: r, Fits: fits})
+	}
+	if totalGB > 0 {
+		// Higher GPU share first (faster), then smaller footprint.
+		sort.SliceStable(entries, func(i, j int) bool {
+			if entries[i].GPUPercent != entries[j].GPUPercent {
+				return entries[i].GPUPercent > entries[j].GPUPercent
+			}
+			return entries[i].MemGB < entries[j].MemGB
+		})
+	}
+	if len(entries) > limit {
+		entries = entries[:limit]
+	}
+	return entries
+}
+
+// recFor returns the benchmark-reference entry for a model tag, matching the
+// exact tag first, then the base name (before ':'). ok=false when none.
+func recFor(rec store.Recommended, tag string) (store.RecModel, bool) {
+	base := tag
+	if i := indexByte(base, ':'); i >= 0 {
+		base = base[:i]
+	}
+	var baseHit *store.RecModel
+	for idx := range rec.Models {
+		r := rec.Models[idx]
+		if r.Tag == tag {
+			return r, true
+		}
+		rb := r.Tag
+		if i := indexByte(rb, ':'); i >= 0 {
+			rb = rb[:i]
+		}
+		if rb == base && baseHit == nil {
+			baseHit = &rec.Models[idx]
+		}
+	}
+	if baseHit != nil {
+		return *baseHit, true
+	}
+	return store.RecModel{}, false
+}
+
+func indexByte(s string, b byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
 }

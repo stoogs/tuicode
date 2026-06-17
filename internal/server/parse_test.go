@@ -129,7 +129,7 @@ func TestParsePSEmpty(t *testing.T) {
 func TestParseShowContext(t *testing.T) {
 	body := `{
 		"details": {"parameter_size":"30B","quantization_level":"Q4_K_M","family":"qwen3"},
-		"model_info": {"general.architecture":"qwen3","qwen3.context_length": 262144}
+		"model_info": {"general.architecture":"qwen3","qwen3.context_length": 262144, "qwen3.block_count": 48}
 	}`
 	d, err := ParseShow([]byte(body))
 	if err != nil {
@@ -138,8 +138,44 @@ func TestParseShowContext(t *testing.T) {
 	if d.ContextLength != 262144 {
 		t.Errorf("context = %d", d.ContextLength)
 	}
+	if d.BlockCount != 48 {
+		t.Errorf("block_count = %d, want 48", d.BlockCount)
+	}
 	if d.ParamSize != "30B" || d.Quant != "Q4_K_M" {
 		t.Errorf("details = %q %q", d.ParamSize, d.Quant)
+	}
+}
+
+func TestParseShowMultimodal(t *testing.T) {
+	// A multimodal model (gemma4) carries vision/audio block_count keys too — the
+	// main text block_count must win, not a submodule's.
+	body := `{
+		"details": {"parameter_size":"8B","quantization_level":"Q4_K_M","family":"gemma4"},
+		"capabilities": ["completion","vision","audio","tools","thinking"],
+		"model_info": {
+			"general.architecture":"gemma4",
+			"gemma4.context_length": 131072,
+			"gemma4.block_count": 42,
+			"gemma4.vision.block_count": 16,
+			"gemma4.audio.block_count": 12,
+			"gemma4.attention.sliding_window": 1024
+		}
+	}`
+	d, err := ParseShow([]byte(body))
+	if err != nil {
+		t.Fatalf("ParseShow: %v", err)
+	}
+	if d.SlidingWindow != 1024 {
+		t.Errorf("sliding_window = %d, want 1024", d.SlidingWindow)
+	}
+	if d.BlockCount != 42 {
+		t.Errorf("block_count = %d, want 42 (text model, not vision/audio)", d.BlockCount)
+	}
+	if d.ContextLength != 131072 {
+		t.Errorf("context = %d, want 131072", d.ContextLength)
+	}
+	if !d.HasCapability("tools") || !d.HasCapability("vision") {
+		t.Errorf("capabilities = %v, want tools+vision", d.Capabilities)
 	}
 }
 

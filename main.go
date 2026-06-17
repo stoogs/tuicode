@@ -106,6 +106,17 @@ func main() {
 		opencodeBin = report.OpenCode.Path
 	}
 
+	// Pull-screen lists: a curated/cached trending list and the editable
+	// benchmark reference. Both seed from embedded defaults on first run.
+	trending, err := st.LoadTrending()
+	if err != nil {
+		logf(fmt.Sprintf("warning: load trending: %v", err))
+	}
+	recommended, err := st.LoadRecommended()
+	if err != nil {
+		logf(fmt.Sprintf("warning: load recommended: %v", err))
+	}
+
 	opts := tui.Options{
 		Backend:      be,
 		Store:        st,
@@ -115,6 +126,8 @@ func main() {
 		OpencodeJSON: target,
 		WorkingDir:   workdir,
 		OpencodeBin:  opencodeBin,
+		Trending:     trending,
+		Recommended:  recommended,
 		DryRun:       *flagDryRun,
 		Verbose:      *flagVerbose,
 		Logf:         logf,

@@ -1,0 +1,23 @@
+[
+  {"tag": "qwen3:4b", "params_b": 4, "note": "general · fast"},
+  {"tag": "qwen3:8b", "params_b": 8, "note": "general"},
+  {"tag": "qwen3:14b", "params_b": 14, "note": "general"},
+  {"tag": "qwen3:30b-a3b", "params_b": 30, "note": "MoE · fast"},
+  {"tag": "qwen2.5-coder:1.5b", "params_b": 1.5, "note": "coding · tiny"},
+  {"tag": "qwen2.5-coder:3b", "params_b": 3, "note": "coding"},
+  {"tag": "qwen2.5-coder:7b", "params_b": 7, "note": "coding"},
+  {"tag": "qwen2.5-coder:14b", "params_b": 14, "note": "coding"},
+  {"tag": "qwen2.5-coder:32b", "params_b": 32, "note": "coding · strong"},
+  {"tag": "qwen3-coder:30b", "params_b": 30, "note": "coding · agentic"},
+  {"tag": "llama3.2:1b", "params_b": 1, "note": "tiny starter"},
+  {"tag": "llama3.2:3b", "params_b": 3, "note": "general · fast"},
+  {"tag": "llama3.1:8b", "params_b": 8, "note": "general"},
+  {"tag": "mistral:7b", "params_b": 7, "note": "general"},
+  {"tag": "mistral-nemo:12b", "params_b": 12, "note": "general · 128k"},
+  {"tag": "devstral:24b", "params_b": 24, "note": "coding · agentic"},
+  {"tag": "phi4:14b", "params_b": 14, "note": "reasoning"},
+  {"tag": "deepseek-r1:7b", "params_b": 7, "note": "reasoning"},
+  {"tag": "deepseek-r1:8b", "params_b": 8, "note": "reasoning"},
+  {"tag": "deepseek-r1:14b", "params_b": 14, "note": "reasoning"},
+  {"tag": "deepseek-r1:32b", "params_b": 32, "note": "reasoning · strong"}
+]

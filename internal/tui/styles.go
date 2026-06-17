@@ -22,7 +22,9 @@ var (
 	keyStyle  = lipgloss.NewStyle().Bold(true).Foreground(colAccent)
 	helpStyle = lipgloss.NewStyle().Foreground(colMuted)
 
-	selectedStyle = lipgloss.NewStyle().Bold(true).Foreground(colFg).Background(lipgloss.Color("236"))
+	// The cell cursor — a bright silver block so it's easy to spot moving across
+	// the editable columns (dark text on a light-grey background).
+	selectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("232")).Background(lipgloss.Color("250"))
 
 	dividerStyle = lipgloss.NewStyle().Foreground(colMuted)
 )
@@ -70,10 +72,13 @@ func progressBar(frac float64, width int) string {
 			b = append(b, '░')
 		}
 	}
-	style := goodStyle
-	if frac > 0.85 {
-		style = badStyle
-	} else if frac > 0.7 {
+	// Progress semantics: redder at the start, greener as it nears completion
+	// (this bar tracks downloads / model-load, where "full" is success).
+	style := badStyle
+	switch {
+	case frac >= 0.66:
+		style = goodStyle
+	case frac >= 0.33:
 		style = warnStyle
 	}
 	return style.Render(string(b))
@@ -81,10 +86,11 @@ func progressBar(frac float64, width int) string {
 
 var usedBlockStyle = lipgloss.NewStyle().Foreground(colFg) // white = already used
 
-// stackedBar renders a memory bar: white ▓ for the already-used fraction, then
-// (optionally) a projected fraction in ▒ (accent, or red if it would overflow),
-// then dim ░ for free space.
-func stackedBar(usedFrac, projFrac float64, width int) string {
+// stackedBar renders a memory bar with up to four segments: white ▓ for memory
+// used by *other* things (baseFrac), green ▓ for the loaded model's own share
+// (modelFrac), an optional projected fraction in ▒ (accent, or red if it would
+// overflow), then dim ░ for free space.
+func stackedBar(baseFrac, modelFrac, projFrac float64, width int) string {
 	clamp01 := func(f float64) float64 {
 		if f < 0 {
 			return 0
@@ -97,20 +103,24 @@ func stackedBar(usedFrac, projFrac float64, width int) string {
 	if width < 1 {
 		width = 1
 	}
-	usedN := int(clamp01(usedFrac)*float64(width) + 0.5)
-	if usedN > width {
-		usedN = width
+	baseN := int(clamp01(baseFrac)*float64(width) + 0.5)
+	if baseN > width {
+		baseN = width
+	}
+	modelN := int(clamp01(modelFrac)*float64(width) + 0.5)
+	if baseN+modelN > width {
+		modelN = width - baseN
 	}
 	projN := int(projFrac*float64(width) + 0.5)
 	overflow := false
-	if usedN+projN > width {
-		projN = width - usedN
+	if baseN+modelN+projN > width {
+		projN = width - baseN - modelN
 		overflow = true
 	}
 	if projN < 0 {
 		projN = 0
 	}
-	freeN := width - usedN - projN
+	freeN := width - baseN - modelN - projN
 
 	rep := func(n int, r rune) string {
 		out := make([]rune, n)
@@ -123,7 +133,8 @@ func stackedBar(usedFrac, projFrac float64, width int) string {
 	if overflow {
 		projStyle = badStyle
 	}
-	return usedBlockStyle.Render(rep(usedN, '▓')) +
+	return usedBlockStyle.Render(rep(baseN, '▓')) +
+		goodStyle.Render(rep(modelN, '▓')) +
 		projStyle.Render(rep(projN, '▒')) +
 		dividerStyle.Render(rep(freeN, '░'))
 }

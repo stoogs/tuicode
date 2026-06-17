@@ -505,26 +505,42 @@ func TestDeviceCycleFromDashboard(t *testing.T) {
 }
 
 func TestFittingModels(t *testing.T) {
+	// 16GB GPU, 64GB system RAM. Models bigger than VRAM should still appear
+	// (they run via a CPU/GPU split), only models bigger than RAM are excluded.
 	det := hw.Detection{Mode: hw.Auto, RAM: hw.Memory{Source: "ram", Total: 64 * gib},
 		GPU: &hw.Memory{Source: "gpu", Total: 16 * gib, Free: 16 * gib}, HasGPU: true}
-	list := fittingModels(det, trendingLimit)
+	trending := []store.TrendingModel{
+		{Tag: "llama3.2:1b", ParamsB: 1}, {Tag: "qwen3:8b", ParamsB: 8},
+		{Tag: "qwen2.5-coder:32b", ParamsB: 32}, // ~17.6GB: > VRAM, < RAM → CPU split
+		{Tag: "huge:200b", ParamsB: 200},        // > 64GB RAM → excluded
+	}
+	list := fittingModels(trending, det, trendingLimit)
 	if len(list) == 0 || len(list) > trendingLimit {
 		t.Fatalf("got %d models, want 1..%d", len(list), trendingLimit)
 	}
+	byTag := map[string]catalogEntry{}
 	for _, e := range list {
 		if !e.Fits {
-			t.Errorf("%s included but does not fit (est %.1f)", e.Tag, e.EstGB)
+			t.Errorf("%s included but does not fit RAM (est %.1f)", e.Tag, e.EstGB)
 		}
+		byTag[e.Tag] = e
 	}
-	// Largest-that-fits first.
+	// Largest-that-runs first.
 	if list[0].ParamsB < list[len(list)-1].ParamsB {
 		t.Errorf("not sorted largest-first: %.0f then %.0f", list[0].ParamsB, list[len(list)-1].ParamsB)
 	}
-	// A 16GB card must exclude a 32B model (~17.6GB at Q4).
-	for _, e := range list {
-		if e.ParamsB >= 32 {
-			t.Errorf("32B+ model %s should not fit in 16GB", e.Tag)
-		}
+	// A model that exceeds system RAM is excluded.
+	if _, ok := byTag["huge:200b"]; ok {
+		t.Error("200B model should not fit in 64GB RAM")
+	}
+	// A 32B (~17.6GB) exceeds the 16GB GPU but fits RAM → shown, flagged as a split.
+	if e, ok := byTag["qwen2.5-coder:32b"]; !ok {
+		t.Error("32B model should be shown (runs via CPU split)")
+	} else if e.VRAMFit {
+		t.Error("32B model should not fit entirely in 16GB VRAM")
+	}
+	if e, ok := byTag["llama3.2:1b"]; ok && !e.VRAMFit {
+		t.Error("1B model should fit entirely in VRAM")
 	}
 }
 

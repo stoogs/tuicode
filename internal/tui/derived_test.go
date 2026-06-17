@@ -90,8 +90,10 @@ func TestCPUOnlyBakesNumGPUZero(t *testing.T) {
 }
 
 func TestReloadOnContextChangeBeforeLaunch(t *testing.T) {
-	// Model loaded as the base (default ctx). User raises ctx, then opens it →
-	// must reload (create+load the derived) rather than exec immediately.
+	// Model loaded as the base (default ctx). User raises ctx — a VRAM-affecting
+	// change — then presses Enter. tuicode must reload (create+load the derived)
+	// to apply the change WITHOUT auto-launching OpenCode, so the new split/VRAM
+	// can be measured. Only once it's reloaded does the next Enter open OpenCode.
 	be := &fakeBackend{reachable: true,
 		disk:   []server.DiskModel{{Tag: "a:1b", Size: gib, ParamSize: "1B", Quant: "Q4_K_M"}},
 		loaded: []server.LoadedModel{loadedModel("a:1b")},
@@ -101,13 +103,13 @@ func TestReloadOnContextChangeBeforeLaunch(t *testing.T) {
 	m.loaded = be.loaded
 	m.screen = screenDashboard
 	m.dashCol = colContext
-	model, _ := m.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(".")}) // ctx → 8192
+	model, _ := m.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(".")}) // ctx → 4096 (non-default)
 	m = model.(Model)
 
-	model2, cmd := m.updateDashboard(tea.KeyMsg{Type: tea.KeyEnter}) // open
+	model2, cmd := m.updateDashboard(tea.KeyMsg{Type: tea.KeyEnter}) // apply + measure
 	mm := model2.(Model)
-	if mm.launchAfter != "a:1b" {
-		t.Errorf("expected launchAfter set for reload-then-launch, got %q", mm.launchAfter)
+	if mm.launchAfter != "" {
+		t.Errorf("a settings-change reload must NOT auto-launch OpenCode, got launchAfter=%q", mm.launchAfter)
 	}
 	if mm.pending["a:1b"] != "load" {
 		t.Errorf("expected a reload (pending load), got %q", mm.pending["a:1b"])
@@ -115,6 +117,13 @@ func TestReloadOnContextChangeBeforeLaunch(t *testing.T) {
 	drain(cmd)
 	if len(be.createCalls) != 1 {
 		t.Errorf("expected derived create on reload, got %d", len(be.createCalls))
+	}
+
+	// On reload completion the dashboard shows the "loaded — [⏎] continue" prompt
+	// rather than launching, so the user can read the measured split first.
+	model3, _ := mm.Update(actionResultMsg{action: "load", tag: "a:1b"})
+	if got := model3.(Model).loadedPrompt; got != "a:1b" {
+		t.Errorf("expected loadedPrompt after measure-reload, got %q", got)
 	}
 }
 

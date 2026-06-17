@@ -76,7 +76,20 @@ type ModelDetails struct {
 	ParamSize     string // "30B"
 	Quant         string // "Q4_K_M"
 	Family        string
-	ContextLength int // model's max context, 0 if unknown
+	ContextLength int      // model's max context, 0 if unknown
+	BlockCount    int      // transformer layers (for GPU-offload split estimates), 0 if unknown
+	SlidingWindow int      // local-attention window (0 = full attention); shrinks KV at long ctx
+	Capabilities  []string // e.g. ["completion","tools","vision"], from `ollama show`
+}
+
+// HasCapability reports whether the model advertises capability c (e.g. "tools").
+func (d ModelDetails) HasCapability(c string) bool {
+	for _, x := range d.Capabilities {
+		if x == c {
+			return true
+		}
+	}
+	return false
 }
 
 // DaemonStatus describes Ollama daemon reachability.

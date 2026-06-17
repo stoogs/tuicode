@@ -155,3 +155,32 @@ func TestEstimateWontFit(t *testing.T) {
 		t.Errorf("expected a warning")
 	}
 }
+
+func TestEstimateUsageSlidingWindow(t *testing.T) {
+	gib := 1024.0 * 1024 * 1024 // float var so the non-integral product converts
+	// Gemma-style: 11.9B Q4 (~6.9GB), 48 layers, 1024 window, 128k context.
+	weights := int64(6.9 * gib)
+	naive := EstimateUsage(11.9, "Q4_K_M", 131072, weights)
+	sw := EstimateUsageArch(11.9, "Q4_K_M", 131072, weights, 48, 1024)
+
+	if !sw.Known || !naive.Known {
+		t.Fatal("expected known usage")
+	}
+	// Sliding window must dramatically cut the KV term vs full attention.
+	if sw.KVGB >= naive.KVGB*0.5 {
+		t.Errorf("sliding-window KV %.2f not much less than naive %.2f", sw.KVGB, naive.KVGB)
+	}
+	// Naive badly overshoots (~17.5GB); sliding-window lands far closer to the
+	// real ~11.6GB and never below the weights.
+	if naive.TotalGB < 15 {
+		t.Errorf("expected naive to overshoot (>15GB), got %.1f", naive.TotalGB)
+	}
+	if sw.TotalGB > 13 || sw.TotalGB < sw.WeightsGB {
+		t.Errorf("sliding-window total %.1f out of sane range", sw.TotalGB)
+	}
+	// Below the window, sliding window changes nothing.
+	if EstimateUsageArch(11.9, "Q4_K_M", 1024, weights, 48, 1024).KVGB !=
+		EstimateUsage(11.9, "Q4_K_M", 1024, weights).KVGB {
+		t.Error("sliding window should not affect ctx <= window")
+	}
+}

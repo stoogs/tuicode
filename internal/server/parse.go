@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -83,25 +84,42 @@ func ParsePS(body []byte) ([]LoadedModel, error) {
 // ParseShow parses a /api/show response body into ModelDetails.
 func ParseShow(body []byte) (ModelDetails, error) {
 	var r struct {
-		Details   modelDetails   `json:"details"`
-		ModelInfo map[string]any `json:"model_info"`
+		Details      modelDetails   `json:"details"`
+		ModelInfo    map[string]any `json:"model_info"`
+		Capabilities []string       `json:"capabilities"`
 	}
 	if err := json.Unmarshal(body, &r); err != nil {
 		return ModelDetails{}, err
 	}
 	d := ModelDetails{
-		ParamSize: r.Details.ParameterSize,
-		Quant:     r.Details.QuantizationLevel,
-		Family:    r.Details.Family,
+		ParamSize:    r.Details.ParameterSize,
+		Quant:        r.Details.QuantizationLevel,
+		Family:       r.Details.Family,
+		Capabilities: r.Capabilities,
 	}
-	// model_info holds "<family>.context_length" among many keys.
-	for k, v := range r.ModelInfo {
-		if len(k) > len(".context_length") && k[len(k)-len(".context_length"):] == ".context_length" {
-			switch n := v.(type) {
-			case float64:
-				d.ContextLength = int(n)
+	// model_info holds "<arch>.context_length" / "<arch>.block_count" — but
+	// multimodal models (e.g. gemma4) ALSO carry ".vision.block_count" and
+	// ".audio.block_count". Use the main text-model values: prefer the exact
+	// "<general.architecture>.<key>", and never pick a vision/audio submodule.
+	arch, _ := r.ModelInfo["general.architecture"].(string)
+	mainInt := func(suffix string) int {
+		if arch != "" {
+			if n, ok := r.ModelInfo[arch+suffix].(float64); ok {
+				return int(n)
 			}
 		}
+		for k, v := range r.ModelInfo {
+			if !strings.HasSuffix(k, suffix) || strings.Contains(k, ".vision.") || strings.Contains(k, ".audio.") {
+				continue
+			}
+			if n, ok := v.(float64); ok {
+				return int(n)
+			}
+		}
+		return 0
 	}
+	d.ContextLength = mainInt(".context_length")
+	d.BlockCount = mainInt(".block_count")
+	d.SlidingWindow = mainInt(".attention.sliding_window")
 	return d, nil
 }

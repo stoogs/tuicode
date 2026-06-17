@@ -20,13 +20,15 @@ const (
 	colCount
 )
 
-// table layout: column widths and which table columns are editable.
+// table layout: column widths and which table columns are editable. There's no
+// status column — a model's state is shown by the row colour (green = loaded,
+// yellow = loading, red = stopping/deleting).
 //
-//	★ ST MODEL SIZE PARAMS ON CTX GPU PRESET
+//	★ MODEL SIZE PARAMS ON CTX GPU PRESET
 var (
-	colWidths      = []int{1, 4, 21, 6, 12, 4, 7, 6, 14}
-	colHeaders     = []string{"★", "ST", "MODEL", "SIZE", "PARAMS", "ON", "CTX", "GPU", "PRESET"}
-	editableIdx    = []int{6, 7, 8} // CTX, GPU, PRESET
+	colWidths      = []int{1, 21, 6, 12, 4, 7, 6, 14}
+	colHeaders     = []string{"★", "MODEL", "SIZE", "PARAMS", "ON", "CTX", "GPU", "PRESET"}
+	editableIdx    = []int{5, 6, 7} // CTX, GPU, PRESET
 	tableWidthHint = sum(colWidths) + len(colWidths) + 1
 )
 
@@ -151,16 +153,17 @@ func (m Model) viewDashboard() string {
 		[2]string{"←→/tab", "column"},
 		[2]string{",.", "change"},
 		[2]string{"⏎/l", "load → open"},
-		[2]string{"f", "★ favourite"},
+		[2]string{"c", "continue"},
+		[2]string{"C", "global"},
 	))
 	b.WriteString("\n")
 	b.WriteString(footer(
-		[2]string{"o", "open"},
+		[2]string{"o", "ollama pull"},
+		[2]string{"p", "prefs"},
 		[2]string{"esc/u", "unload"},
 		[2]string{"d", "device"},
-		[2]string{"c", "configure"},
+		[2]string{"f", "★ fav"},
 		[2]string{"del", "delete"},
-		[2]string{"p", "pull"},
 		[2]string{"s", "settings"},
 		[2]string{"q", "quit"},
 	))
@@ -225,39 +228,57 @@ func spanRow(content string) string {
 	return bar() + " " + content + strings.Repeat(" ", pad) + bar()
 }
 
-// renderRow renders one model row.
+// renderRow renders one model row. The whole row is tinted by state — green when
+// loaded, yellow while loading, red while stopping/deleting — so there's no need
+// for a separate status column.
 func (m Model) renderRow(i int, dm server.DiskModel) string {
 	cfg := m.ensureConfig(dm.Tag)
 	lm, _, loaded := m.loadedFor(dm.Tag)
 	selected := i == m.dashCursor
 
-	// favourite star column
+	// Row state colour (stateful=false → a stopped model, rendered normally).
+	rowStyle, stateful := mutedStyle, false
+	switch m.pending[dm.Tag] {
+	case "load":
+		rowStyle, stateful = warnStyle, true
+	case "unload", "delete":
+		rowStyle, stateful = badStyle, true
+	default:
+		if loaded {
+			rowStyle, stateful = goodStyle, true
+		}
+	}
+	noStyle := lipgloss.NewStyle()
+	// styled renders a cell in the row's state colour when stateful, else in fb.
+	styled := func(text string, fb lipgloss.Style) string {
+		if stateful {
+			return rowStyle.Render(text)
+		}
+		return fb.Render(text)
+	}
+
+	// favourite star column (always yellow so it reads as a marker)
 	star := " "
 	if dm.Tag == m.opts.AppConfig.Favourite {
 		star = "★"
 	}
 	starCell := warnStyle.Render(center(star, colWidths[0]))
 
-	glyph, gstyle := m.stateGlyph(dm.Tag)
-	stateCell := gstyle.Render(center(glyph, colWidths[1]))
-
-	modelText := cell(dm.Tag, colWidths[2])
-	modelCell := modelText
+	modelText := cell(dm.Tag, colWidths[1])
+	modelCell := styled(modelText, noStyle)
 	if selected {
-		modelCell = accentStyle.Render(modelText)
+		modelCell = accentStyle.Render(modelText) // selection beats state colour
 	}
 
-	sizeCell := cell(fmtGBShort(dm.Size), colWidths[3])
-
-	// params/quant column, e.g. "7B Q4_K_M"
-	paramsCell := cell(paramsQuant(dm), colWidths[4])
+	sizeCell := styled(cell(fmtGBShort(dm.Size), colWidths[2]), noStyle)
+	paramsCell := styled(cell(paramsQuant(dm), colWidths[3]), noStyle)
 
 	// live placement column (where the resident instance runs)
 	onStr := "—"
 	if loaded {
 		onStr = shortProc(lm)
 	}
-	onCell := cell(onStr, colWidths[5])
+	onCell := styled(cell(onStr, colWidths[4]), noStyle)
 
 	// editable values, in the same order as editableIdx (CTX, GPU, PRESET)
 	ctxStr := contextShort(cfg.ContextLength)
@@ -274,10 +295,12 @@ func (m Model) renderRow(i int, dm server.DiskModel) string {
 		text := cell(editVals[k], colWidths[tcol])
 		switch {
 		case selected && m.dashCol == k:
-			editCells[k] = selectedStyle.Render(text)
+			editCells[k] = selectedStyle.Render(text) // the cell cursor
 		case k == colNumGPU && cpuForced:
 			// Flag CPU-only mode loudly so it isn't a silent surprise.
 			editCells[k] = badStyle.Render(text)
+		case stateful:
+			editCells[k] = rowStyle.Render(text)
 		case selected:
 			editCells[k] = text
 		default:
@@ -286,7 +309,7 @@ func (m Model) renderRow(i int, dm server.DiskModel) string {
 	}
 
 	cells := []string{
-		starCell, stateCell, modelCell, sizeCell, paramsCell, onCell,
+		starCell, modelCell, sizeCell, paramsCell, onCell,
 		editCells[0], editCells[1], editCells[2],
 	}
 	var out strings.Builder
@@ -297,25 +320,30 @@ func (m Model) renderRow(i int, dm server.DiskModel) string {
 	return out.String()
 }
 
-// stateGlyph returns the status glyph + style for a model.
-//
-//	loading → ◐ yellow   stopping/deleting → ● red
-//	running → ● green     stopped → ○ grey
-func (m Model) stateGlyph(tag string) (string, lipgloss.Style) {
-	switch m.pending[tag] {
-	case "load":
-		return "◐", warnStyle
-	case "unload", "delete":
-		return "●", badStyle
+// numGPUChoices is the fallback GPU-offload step list (auto, CPU, every 4 layers
+// up to 96, then "all") used when the model's real layer count isn't known yet.
+// Prefer (m Model).gpuChoices, which caps the steps at the model's actual layers.
+var numGPUChoices = gpuChoicesUpTo(96)
+
+// gpuChoicesUpTo builds the offload steps: auto, CPU (0), every 4 layers up to
+// max, then "all" (99 = offload everything).
+func gpuChoicesUpTo(max int) []int {
+	c := []int{store.NumGPUAuto, 0}
+	for n := 4; n < max; n += 4 {
+		c = append(c, n)
 	}
-	if _, _, loaded := m.loadedFor(tag); loaded {
-		return "●", goodStyle
-	}
-	return "○", mutedStyle
+	return append(c, 99) // 99 = "all" layers
 }
 
-// numGPUChoices are the GPU-offload steps cycled with ,/. (-1 = auto, 0 = CPU).
-var numGPUChoices = []int{store.NumGPUAuto, 0, 8, 16, 24, 32, 48, 64, 99}
+// gpuChoices returns the offload steps for a tag, capped at its real layer count
+// (from `ollama show`) when known — e.g. a 27-layer model stops at 24 then
+// "all", instead of offering up to 96. Falls back to numGPUChoices otherwise.
+func (m Model) gpuChoices(tag string) []int {
+	if d, ok := m.details[tag]; ok && d.BlockCount > 0 {
+		return gpuChoicesUpTo(d.BlockCount)
+	}
+	return numGPUChoices
+}
 
 // numGPUShort renders the GPU-layers cell value.
 func numGPUShort(cfg store.ModelConfig, mode hw.DeviceMode) string {
@@ -370,6 +398,34 @@ func (m Model) modelMeta(tag string) (paramsB float64, quant string, sizeBytes i
 	return paramsB, quant, sizeBytes
 }
 
+// reclaimableGB is the memory currently held by loaded models in the given pool
+// ("gpu" or "ram") that would be freed when a new model loads — tuicode loads one
+// model at a time, unloading any other first. Used so the fit preview measures a
+// new model against the memory it would *actually* have, not just what's free now.
+func (m Model) reclaimableGB(source string) float64 {
+	var b int64
+	for _, lm := range m.loaded {
+		if source == "gpu" {
+			b += lm.SizeVRAM
+		} else {
+			b += lm.Size - lm.SizeVRAM
+		}
+	}
+	return float64(b) / gib
+}
+
+// usageFor projects a model's footprint at the given context, feeding in
+// architecture hints (layer count, sliding-window) from `ollama show` when
+// available so sliding-window models aren't wildly overestimated.
+func (m Model) usageFor(tag string, ctx int) hw.Usage {
+	pB, q, sz := m.modelMeta(tag)
+	var layers, window int
+	if d, ok := m.details[tag]; ok {
+		layers, window = d.BlockCount, d.SlidingWindow
+	}
+	return hw.EstimateUsageArch(pB, q, ctx, sz, layers, window)
+}
+
 // ctxNote describes the context for the INFO line. For a default context it
 // notes the ~4k Ollama loads at plus the model's max (from `ollama show`).
 func (m Model) ctxNote(tag string, ctx int) string {
@@ -389,108 +445,327 @@ func (m Model) ctxNote(tag string, ctx int) string {
 func (m Model) renderInfo() string {
 	tag, ok := m.selectedDiskTag()
 	if !ok {
-		return mutedStyle.Render("INFO  no model selected") + "\n\n"
+		return mutedStyle.Render("INFO  no model selected") + "\n\n\n"
 	}
 	if m.pending[tag] == "load" {
 		return m.renderLoadingInfo(tag)
 	}
 
 	cfg := m.ensureConfig(tag)
-	paramsB, quant, size := m.modelMeta(tag)
-	usage := hw.EstimateUsage(paramsB, quant, cfg.ContextLength, size)
+	usage := m.usageFor(tag, cfg.ContextLength)
 
 	mem := m.detection.Authoritative()
 	totalGB := float64(mem.Total) / gib
 	freeGB := float64(mem.Free) / gib
 	reserveGB := float64(m.detection.Reserve()) / gib
 	src := strings.ToUpper(mem.Source)
-	_, _, loaded := m.loadedFor(tag)
+	lm, actual, loaded := m.loadedFor(tag)
+	// "Measured" only applies when the resident instance matches the current
+	// settings. After a CTX/GPU change the serve tag differs, so we fall back to
+	// the estimate for the *new* settings until the user reloads.
+	serve := serveTag(tag, cfg, m.opts.DeviceMode)
+	upToDate := loaded && actual == serve
 
 	var b strings.Builder
-	b.WriteString(sectionStyle.Render("INFO  ") + accentStyle.Render(tag) + "\n")
+	b.WriteString(sectionStyle.Render("INFO  ") + accentStyle.Render(tag) + m.capabilityNote(tag) + "\n")
 
 	// --- estimated memory line (green while the CTX column is focused) ---
 	estStyle := mutedStyle
 	if m.dashCol == colContext {
 		estStyle = goodStyle
 	}
-	if !usage.Known {
+	switch {
+	case upToDate && lm.Size > 0:
+		// Loaded with the current settings → show the real footprint from
+		// `ollama ps`, not the estimate (estimates are rough — sliding-window
+		// KV, MoE, etc.).
+		b.WriteString("  " + estStyle.Render(fmt.Sprintf(
+			"mem       %.1fGB resident  (measured)", float64(lm.Size)/gib)) + "\n")
+	case m.memorySettling():
+		// Mid-load: VRAM is in flux, so show nothing projected (no green/red flash).
+		b.WriteString("  " + mutedStyle.Render("mem       measuring… (loading)") + "\n")
+	case !usage.Known:
 		b.WriteString("  " + mutedStyle.Render("est. mem   unknown (params/quant not detected)") + "\n")
-	} else {
+	default:
 		est := fmt.Sprintf("est. mem  %.1fGB   weights %.1f + ctx %s ≈ %.1f",
 			usage.TotalGB, usage.WeightsGB, m.ctxNote(tag, cfg.ContextLength), usage.KVGB)
+		if d, ok := m.details[tag]; ok && d.SlidingWindow > 0 {
+			est += " (sliding-window)"
+		}
+		if loaded {
+			est += " · reload to apply"
+		}
+		// Loading a model first unloads any other resident model, so its VRAM is
+		// reclaimable — count it as available when checking whether this one fits.
+		reclaimGB := m.reclaimableGB(mem.Source)
+		avail := freeGB + reclaimGB
+		swap := ""
+		if reclaimGB > 0.1 {
+			swap = " after unload"
+		}
 		fit := ""
 		switch {
-		case loaded:
-			fit = mutedStyle.Render("   (loaded)")
-		case freeGB <= 0:
+		case freeGB <= 0 && reclaimGB <= 0:
 			// no live free figure; fall back to total
 			if usage.TotalGB+reserveGB > totalGB {
 				fit = warnStyle.Render("   may not fit")
 			}
-		case usage.TotalGB+reserveGB <= freeGB:
-			fit = goodStyle.Render(fmt.Sprintf("   ✓ fits (%.1f free %s)", freeGB, src))
+		case usage.TotalGB+reserveGB <= avail:
+			fit = goodStyle.Render(fmt.Sprintf("   ✓ fits (%.1f %s free%s)", avail, src, swap))
 		default:
-			fit = badStyle.Render(fmt.Sprintf("   ✗ needs %.1f, only %.1f free %s", usage.TotalGB+reserveGB, freeGB, src))
+			fit = badStyle.Render(fmt.Sprintf("   ✗ needs %.1f, only %.1f %s free%s", usage.TotalGB+reserveGB, avail, src, swap))
 		}
 		b.WriteString("  " + estStyle.Render(est) + fit + "\n")
 	}
 
-	// --- params line (green while the PRESET column is focused) ---
+	// --- CPU/GPU split + VRAM line (green while the GPU column is focused) ---
+	// Live placement when loaded; otherwise the benchmark reference for the tag.
+	if m.memorySettling() {
+		b.WriteString("  " + mutedStyle.Render("split     measuring… (loading)") + "\n")
+		b.WriteString(m.infoParamsLine(cfg))
+		return b.String()
+	}
+	splitStyle := mutedStyle
+	if m.dashCol == colNumGPU {
+		splitStyle = goodStyle
+	}
+	// Live placement only when the resident instance matches the current
+	// settings; after a change, predict the new split until reload.
+	b.WriteString("  " + splitStyle.Render(m.splitLine(tag, lm, upToDate)) + "\n")
+
+	b.WriteString(m.infoParamsLine(cfg))
+	return b.String()
+}
+
+// infoParamsLine renders the sampler-params line (green while the PRESET column
+// is focused). No trailing newline — it's the last line of the INFO zone.
+func (m Model) infoParamsLine(cfg store.ModelConfig) string {
 	presetName := store.Presets()[matchPreset(cfg.Parameters)].Name
 	params := fmt.Sprintf("params     %s · temp %.2f · top_p %.2f · top_k %d",
 		presetName, cfg.Parameters.Temperature, cfg.Parameters.TopP, cfg.Parameters.TopK)
 	if m.dashCol == colPreset {
-		b.WriteString("  " + goodStyle.Render(params))
-	} else {
-		b.WriteString("  " + mutedStyle.Render(params))
+		return "  " + goodStyle.Render(params)
 	}
-	return b.String()
+	return "  " + mutedStyle.Render(params)
+}
+
+// splitLine renders the CPU/GPU split + VRAM line for the INFO zone: the live
+// placement when the model is loaded, the benchmark reference when known, or the
+// configured offload setting otherwise.
+func (m Model) splitLine(tag string, lm server.LoadedModel, loaded bool) string {
+	if loaded {
+		return fmt.Sprintf("split     %s · %.1fGB VRAM  (live)",
+			lm.Processor(), float64(lm.SizeVRAM)/gib)
+	}
+	// Before loading, predict the split from the chosen GPU-offload setting and
+	// the model's layer count (when known).
+	if pred, ok := m.predictSplit(tag); ok {
+		return pred
+	}
+	if r, ok := recFor(m.opts.Recommended, tag); ok {
+		ref := "ref"
+		if g := m.opts.Recommended.RefGPUGB; g > 0 {
+			ref = fmt.Sprintf("ref %.0fGB GPU", g)
+		}
+		return fmt.Sprintf("split     %s · ~%gGB  (%s)", splitLabel(r.GPUPercent), r.MemGB, ref)
+	}
+	cfg := m.ensureConfig(tag)
+	return "split     " + numGPULabel(cfg, m.opts.DeviceMode) + " offload — load to measure"
+}
+
+// predictSplit estimates the CPU/GPU split and VRAM use for the selected model
+// *before* loading, from the model's transformer-layer count (`ollama show`),
+// its estimated footprint, and the chosen GPU-offload setting. It assumes
+// roughly equal-sized layers, so it's an estimate (labelled "est"), but it lets
+// you dial the `GPU` column in and see the likely outcome live. ok=false when we
+// lack the layer count or a usable footprint estimate.
+func (m Model) predictSplit(tag string) (string, bool) {
+	d, ok := m.details[tag]
+	if !ok || d.BlockCount <= 0 {
+		return "", false
+	}
+	cfg := m.ensureConfig(tag)
+	u := m.usageFor(tag, cfg.ContextLength)
+	if !u.Known || u.TotalGB <= 0 {
+		return "", false
+	}
+	layers := d.BlockCount
+	n := effectiveNumGPU(cfg, m.opts.DeviceMode)
+	auto := n < 0
+
+	var gpuLayers int
+	if auto {
+		// Ollama fills VRAM with as many layers as fit; estimate how many.
+		perLayer := u.TotalGB / float64(layers)
+		if perLayer > 0 {
+			gpuLayers = int(m.freeVRAMGB() / perLayer)
+		}
+	} else {
+		gpuLayers = n
+	}
+	gpuLayers = clamp(gpuLayers, 0, layers)
+
+	frac := float64(gpuLayers) / float64(layers)
+	predVRAM := frac * u.TotalGB
+	how := "est"
+	if auto {
+		how = "est, auto"
+	}
+	return fmt.Sprintf("split     ~%s · ~%.1fGB VRAM  (%s, %d/%d layers)",
+		splitLabel(int(frac*100+0.5)), predVRAM, how, gpuLayers, layers), true
+}
+
+// freeVRAMGB is the GPU memory available for offload right now (0 = no GPU).
+func (m Model) freeVRAMGB() float64 {
+	g := m.detection.GPU
+	if g == nil {
+		return 0
+	}
+	avail := g.Free
+	if avail <= 0 {
+		avail = g.Total
+	}
+	avail -= m.detection.Reserve() // leave headroom
+	if avail < 0 {
+		avail = 0
+	}
+	return float64(avail) / gib
+}
+
+// capabilityNote appends a compact capability summary to the INFO header, with a
+// loud warning when the model can't tool-call (OpenCode requires it). Empty
+// until `ollama show` has been fetched for the tag.
+func (m Model) capabilityNote(tag string) string {
+	d, ok := m.details[tag]
+	if !ok || len(d.Capabilities) == 0 {
+		return ""
+	}
+	if !d.HasCapability("tools") {
+		return "   " + badStyle.Render("⚠ no tools — OpenCode needs tool-calling")
+	}
+	extras := make([]string, 0, 3)
+	for _, c := range []string{"vision", "audio", "thinking"} {
+		if d.HasCapability(c) {
+			extras = append(extras, c)
+		}
+	}
+	note := "   " + goodStyle.Render("✓ tools")
+	if len(extras) > 0 {
+		note += mutedStyle.Render(" · " + strings.Join(extras, " · "))
+	}
+	return note
+}
+
+// splitLabel renders a GPU-share percentage as Ollama's processor wording.
+func splitLabel(gpuPct int) string {
+	switch {
+	case gpuPct >= 100:
+		return "100% GPU"
+	case gpuPct <= 0:
+		return "100% CPU"
+	default:
+		return fmt.Sprintf("%d%%/%d%% CPU/GPU", 100-gpuPct, gpuPct)
+	}
 }
 
 // renderLoadingInfo renders the animated loading bar for a model being loaded.
 func (m Model) renderLoadingInfo(tag string) string {
+	// Deliberately calm and static — no animated bar/percentage to flicker.
+	// Same 4-line height as the estimate view so nothing below shifts.
 	var b strings.Builder
-	b.WriteString(sectionStyle.Render("INFO  ") + warnStyle.Render("loading "+tag) + "\n")
-
-	// If the model has partially appeared in ps we can show a real %, otherwise
-	// an indeterminate moving bar (Ollama doesn't stream VRAM-load progress).
-	barW := 28
-	lm, _, present := m.loadedFor(tag)
-	if present && lm.Size > 0 && lm.SizeVRAM > 0 && lm.SizeVRAM < lm.Size {
-		frac := float64(lm.SizeVRAM) / float64(lm.Size)
-		b.WriteString("  loading  " + progressBar(frac, barW) +
-			fmt.Sprintf("  %d%%\n", int(frac*100+0.5)))
-	} else {
-		b.WriteString("  loading  " + movingBar(m.spinFrame, barW) + "  " +
-			mutedStyle.Render("warming into VRAM…") + "\n")
-	}
-	b.WriteString("  " + mutedStyle.Render("(other models are being unloaded — one model loads at a time)"))
+	b.WriteString(sectionStyle.Render("INFO  ") + accentStyle.Render(tag) + "\n")
+	b.WriteString("  " + warnStyle.Render("LOADING…") + mutedStyle.Render("   warming into VRAM") + "\n")
+	b.WriteString("  " + mutedStyle.Render("(one model loads at a time — any other is unloaded first)") + "\n")
+	b.WriteString("  " + mutedStyle.Render("memory + split are measured once it's resident"))
 	return b.String()
 }
 
-// renderSession renders the OpenCode session line for the selected model.
+// renderSession renders the OpenCode session zone: a header line with the
+// selected model and its load state, the model's last session + continue
+// command, and the most-recent session across all models. Always five lines so
+// the layout below stays stable.
 func (m Model) renderSession() string {
+	const label = "  %-10s" // left-aligned label gutter
+	blank := "\n"
+
 	tag, ok := m.selectedDiskTag()
 	if !ok {
-		return mutedStyle.Render("SESSION  no model selected")
+		return sectionStyle.Render("SESSION") + "  " + mutedStyle.Render("no model selected") +
+			strings.Repeat("\n", 4)
 	}
+
 	_, _, loaded := m.loadedFor(tag)
-	label := sectionStyle.Render("SESSION  ") + mutedStyle.Render("OpenCode not running")
+	state := mutedStyle.Render("○ not loaded")
 	if loaded {
-		return label + "   " + footer([2]string{"o", "open OpenCode on " + tag})
+		state = goodStyle.Render("● loaded")
 	}
-	return label + "   " + mutedStyle.Render("(load "+tag+" to open a session)")
+
+	var b strings.Builder
+	b.WriteString(sectionStyle.Render("SESSION") + "  " + accentStyle.Render(tag) + "   " + state + "\n")
+
+	// This model's last session + continue command.
+	if ls := m.ensureConfig(tag).LastSession; ls != nil && ls.ID != "" {
+		b.WriteString(mutedStyle.Render(fmt.Sprintf(label, "last")) +
+			helpStyle.Render("\""+clip(sessionTitle(ls), 52)+"\"") + "\n")
+		b.WriteString(mutedStyle.Render(fmt.Sprintf(label, "continue")) +
+			keyStyle.Render("[c]") + " " + mutedStyle.Render("opencode -s "+ls.ID) + "\n")
+	} else {
+		b.WriteString(mutedStyle.Render(fmt.Sprintf(label, "last")) +
+			mutedStyle.Render("none yet — press ") + keyStyle.Render("[⏎]") +
+			mutedStyle.Render(" to start a session") + "\n")
+		b.WriteString(blank)
+	}
+
+	// Most-recent session across all models.
+	if gBase, gRef := m.mostRecentSession(); gRef != nil {
+		desc := gBase
+		if t := sessionTitle(gRef); t != "" {
+			desc += " · \"" + clip(t, 34) + "\""
+		}
+		b.WriteString(mutedStyle.Render(fmt.Sprintf(label, "global")) +
+			keyStyle.Render("[C]") + " " + helpStyle.Render(desc))
+	} else {
+		b.WriteString(mutedStyle.Render(fmt.Sprintf(label, "global")) +
+			mutedStyle.Render("no sessions recorded yet"))
+	}
+	return b.String()
+}
+
+// sessionTitle returns a display title for a session (falling back to its id).
+func sessionTitle(s *store.SessionRef) string {
+	if s.Title != "" {
+		return s.Title
+	}
+	return s.ID
+}
+
+// clip truncates s to at most w runes, appending … when shortened (no padding).
+func clip(s string, w int) string {
+	r := []rune(s)
+	if len(r) <= w {
+		return s
+	}
+	if w <= 1 {
+		return string(r[:w])
+	}
+	return string(r[:w-1]) + "…"
 }
 
 // memBar renders a labeled memory bar: white = already used, accent ▒ = the
 // projected footprint of the selected (unloaded) model, dim = free. projGB == 0
 // draws just used/free.
-func memBar(label string, usedGB, totalGB, projGB float64, w int) string {
+// memBar renders a labeled memory bar. usedGB is total memory in use; modelGB is
+// the share attributable to the loaded model(s), drawn green; the rest of the
+// used space is neutral white. projGB previews a not-yet-loaded model.
+func memBar(label string, usedGB, modelGB, totalGB, projGB float64, w int) string {
 	if totalGB <= 0 {
 		return mutedStyle.Render(label + "  (unknown)")
 	}
-	bar := stackedBar(usedGB/totalGB, projGB/totalGB, barWidth(w))
+	if modelGB > usedGB {
+		modelGB = usedGB
+	}
+	baseGB := usedGB - modelGB
+	bar := stackedBar(baseGB/totalGB, modelGB/totalGB, projGB/totalGB, barWidth(w))
 	s := fmt.Sprintf("%s  %s  %s / %s GB", label, bar, fmtGBf(usedGB), fmtGBf(totalGB))
 	if projGB > 0 {
 		s += mutedStyle.Render(fmt.Sprintf("   ▒ +%.1f to load", projGB))
@@ -502,7 +777,17 @@ func memBar(label string, usedGB, totalGB, projGB float64, w int) string {
 func (m Model) renderRamBar(w int, projGB float64) string {
 	ram := m.detection.RAM
 	usedGB := float64(ram.Total-ram.Free) / gib
-	return memBar("RAM ", usedGB, float64(ram.Total)/gib, projGB, w)
+	// Model's RAM share = the part of resident models NOT on the GPU (CPU spill).
+	modelGB := m.reclaimableGB("ram")
+	if projGB > 0 {
+		// Previewing a swap-in: the resident model unloads first, freeing its RAM.
+		usedGB -= modelGB
+		if usedGB < 0 {
+			usedGB = 0
+		}
+		modelGB = 0
+	}
+	return memBar("RAM ", usedGB, modelGB, float64(ram.Total)/gib, projGB, w)
 }
 
 // renderVramBar renders the GPU VRAM usage bar from nvidia-smi (or summed
@@ -512,17 +797,22 @@ func (m Model) renderVramBar(w int, projGB float64) string {
 	if g == nil {
 		return mutedStyle.Render("VRAM  (no GPU)")
 	}
-	var usedGB float64
+	modelGB := m.reclaimableGB("gpu")
+	usedGB := modelGB
 	if g.Free > 0 {
+		// Live free figure includes non-model usage (display, other procs).
 		usedGB = float64(g.Total-g.Free) / gib
-	} else {
-		var s int64
-		for _, lm := range m.loaded {
-			s += lm.SizeVRAM
-		}
-		usedGB = float64(s) / gib
 	}
-	return memBar("VRAM", usedGB, g.TotalGB(), projGB, w)
+	if projGB > 0 {
+		// Previewing a swap-in: the resident model unloads first, freeing its VRAM,
+		// so draw the projection into that space rather than stacked on top of it.
+		usedGB -= modelGB
+		if usedGB < 0 {
+			usedGB = 0
+		}
+		modelGB = 0
+	}
+	return memBar("VRAM", usedGB, modelGB, g.TotalGB(), projGB, w)
 }
 
 // selectedProjectionGB is the estimated footprint of the selected model when it
@@ -533,12 +823,16 @@ func (m Model) selectedProjectionGB() float64 {
 	if !ok {
 		return 0
 	}
+	// No preview overlay once it's loaded, or while memory readings are settling
+	// (a load in flight consumes VRAM, so free memory is in flux and a projection
+	// for another model would briefly read as an overflow — a red flash).
+	if m.memorySettling() {
+		return 0
+	}
 	if _, _, loaded := m.loadedFor(tag); loaded {
 		return 0
 	}
-	cfg := m.ensureConfig(tag)
-	pB, q, sz := m.modelMeta(tag)
-	u := hw.EstimateUsage(pB, q, cfg.ContextLength, sz)
+	u := m.usageFor(tag, m.ensureConfig(tag).ContextLength)
 	if !u.Known {
 		return 0
 	}
@@ -551,31 +845,6 @@ func barWidth(w int) int {
 		bw = 10
 	}
 	return bw
-}
-
-// movingBar renders an indeterminate "bouncing" progress bar for the given
-// animation frame.
-func movingBar(frame, width int) string {
-	if width < 4 {
-		width = 4
-	}
-	const win = 3
-	span := width - win
-	if span < 1 {
-		span = 1
-	}
-	pos := frame % (2 * span)
-	if pos > span {
-		pos = 2*span - pos // bounce back
-	}
-	runes := make([]rune, width)
-	for i := range runes {
-		runes[i] = '░'
-	}
-	for i := 0; i < win && pos+i < width; i++ {
-		runes[pos+i] = '▓'
-	}
-	return accentStyle.Render(string(runes))
 }
 
 // --- cell formatting helpers ---

@@ -164,6 +164,21 @@ const defaultCtxForBaseline = 4096
 // pass 0 to fall back to a params×quant estimate. context <= 0 means the model's
 // default (a nominal 4k for the KV term).
 func EstimateUsage(paramsB float64, quant string, context int, weightsBytes int64) Usage {
+	return EstimateUsageArch(paramsB, quant, context, weightsBytes, 0, 0)
+}
+
+// slidingGlobalEvery is the layer cadence at which sliding-window models do full
+// (global) attention; the rest cache only the local window. Gemma 3/4 use 5
+// local : 1 global = every 6th layer.
+const slidingGlobalEvery = 6
+
+// EstimateUsageArch is EstimateUsage with architecture hints for a better KV
+// estimate: layers = transformer-block count, slidingWindow = local-attention
+// window (0 = full attention). With a sliding window only ~1-in-slidingGlobalEvery
+// layers caches the full context; the rest cache just the window — so long-context
+// KV is far smaller than a naive guess (this is why Gemma at 128k fits in a
+// fraction of the naive estimate). Both hints 0 ⇒ the plain full-attention estimate.
+func EstimateUsageArch(paramsB float64, quant string, context int, weightsBytes int64, layers, slidingWindow int) Usage {
 	weights := float64(weightsBytes) / gib
 	if weights <= 0 {
 		if paramsB <= 0 {
@@ -184,7 +199,19 @@ func EstimateUsage(paramsB float64, quant string, context int, weightsBytes int6
 	if pB <= 0 {
 		pB = weights / 0.65
 	}
-	kv := float64(ctx) / 1000.0 * pB * kvCoeffPer1kPerB
+
+	// Effective KV context: full ctx for full-attention models, or a blend of
+	// global (full-ctx) and local (window-capped) layers for sliding-window ones.
+	effCtx := float64(ctx)
+	if slidingWindow > 0 && layers > 0 && ctx > slidingWindow {
+		global := layers / slidingGlobalEvery
+		if global < 1 {
+			global = 1
+		}
+		local := layers - global
+		effCtx = float64(global*ctx+local*min(ctx, slidingWindow)) / float64(layers)
+	}
+	kv := effCtx / 1000.0 * pB * kvCoeffPer1kPerB
 
 	return Usage{
 		WeightsGB: weights,

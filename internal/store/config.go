@@ -57,9 +57,10 @@ type Parameters struct {
 type AppConfig struct {
 	DeviceMode       string    `json:"device_mode"` // auto | cpu-only | gpu-only
 	DefaultResidency Residency `json:"default_residency"`
-	OpencodeJSON     string    `json:"opencode_json,omitempty"` // chosen target path
-	WorkingDir       string    `json:"working_dir,omitempty"`   // dir to launch OpenCode in
-	Favourite        string    `json:"favourite,omitempty"`     // model tag selected by default on startup
+	OpencodeJSON     string    `json:"opencode_json,omitempty"`    // chosen target path
+	WorkingDir       string    `json:"working_dir,omitempty"`      // dir to launch OpenCode in
+	Favourite        string    `json:"favourite,omitempty"`        // model tag selected by default on startup
+	TrendingFetched  int64     `json:"trending_fetched,omitempty"` // unix secs of last trending refresh
 }
 
 // DefaultAppConfig returns sane defaults.

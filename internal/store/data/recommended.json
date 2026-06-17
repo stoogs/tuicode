@@ -1,0 +1,20 @@
+{
+  "_comment": "Benchmark reference for choosing a model. mem_gb = RAM+VRAM used; gpu_percent = share of the model on the GPU (100 = fully on GPU, lower = spills to CPU). Edit freely — tuicode never overwrites this file. Source: glukhov.org LLM performance benchmarks for a 16GB-VRAM GPU (2026). ref_gpu_gb documents the GPU the figures were measured on.",
+  "ref_gpu_gb": 16,
+  "models": [
+    {"tag": "gpt-oss:20b", "mem_gb": 14, "gpu_percent": 100, "note": "MoE"},
+    {"tag": "qwen3.5:9b", "mem_gb": 9.3, "gpu_percent": 100},
+    {"tag": "ministral-3:14b", "mem_gb": 13, "gpu_percent": 100},
+    {"tag": "qwen3:14b", "mem_gb": 12, "gpu_percent": 100},
+    {"tag": "qwen3.5:9b-q8_0", "mem_gb": 13, "gpu_percent": 100, "note": "Q8_0"},
+    {"tag": "qwen3-coder:30b", "mem_gb": 20, "gpu_percent": 75, "note": "coding · agentic"},
+    {"tag": "qwen3-vl:30b-a3b", "mem_gb": 22, "gpu_percent": 70, "note": "vision"},
+    {"tag": "glm-4.7-flash", "mem_gb": 21, "gpu_percent": 73},
+    {"tag": "nemotron-3-nano:30b", "mem_gb": 25, "gpu_percent": 62},
+    {"tag": "qwen3.5:35b", "mem_gb": 27, "gpu_percent": 57},
+    {"tag": "devstral-small-2:24b", "mem_gb": 19, "gpu_percent": 82, "note": "coding · agentic"},
+    {"tag": "mistral-small3.2:24b", "mem_gb": 19, "gpu_percent": 82},
+    {"tag": "gpt-oss:120b", "mem_gb": 66, "gpu_percent": 22, "note": "MoE · large"},
+    {"tag": "qwen3.5:27b", "mem_gb": 24, "gpu_percent": 57}
+  ]
+}

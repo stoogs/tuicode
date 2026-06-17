@@ -42,11 +42,13 @@ func (m Model) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "up", "k":
 		if m.dashCursor > 0 {
 			m.dashCursor--
+			m.clearTransient() // last edit's confirmation belongs to the old row
 		}
 		return m, m.ensureDetailsCmd()
 	case "down", "j":
 		if m.dashCursor < len(m.disk)-1 {
 			m.dashCursor++
+			m.clearTransient()
 		}
 		return m, m.ensureDetailsCmd()
 
@@ -86,7 +88,8 @@ func (m Model) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// actions on the selected model
 	case "enter", " ":
-		// Progressive: load if stopped; once loaded, open OpenCode on it.
+		// Progressive: load if stopped; once loaded with the current settings,
+		// open OpenCode on it.
 		tag, ok := m.selectedDiskTag()
 		if !ok {
 			return m, nil
@@ -95,9 +98,15 @@ func (m Model) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = tag + " " + st + " in progress…"
 			return m, nil
 		}
-		// Loaded check must use loadedFor — a non-default-context model is
-		// resident under its derived tag, not the base tag.
-		if _, _, loaded := m.loadedFor(tag); loaded {
+		// loadedFor reports the resident instance's serve tag; serveTag encodes
+		// the VRAM-affecting settings (context + GPU layers). When they match,
+		// open OpenCode. When they differ — i.e. a VRAM-affecting setting changed
+		// since load — (re)load to apply it and STOP at the "loaded — [⏎]
+		// continue" prompt, so the new split/VRAM can be measured before
+		// launching. doLoad does not chain a launch, so this never opens OpenCode
+		// until the model is resident with the chosen settings.
+		serve := serveTag(tag, m.ensureConfig(tag), m.opts.DeviceMode)
+		if _, actual, loaded := m.loadedFor(tag); loaded && actual == serve {
 			return m.launchOpenCode(tag)
 		}
 		return m.doLoad(tag)
@@ -113,24 +122,27 @@ func (m Model) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.doUnload(tag)
 		}
 		return m, nil
-	case "o":
-		if tag, ok := m.selectedDiskTag(); ok {
-			if _, _, loaded := m.loadedFor(tag); loaded {
-				return m.launchOpenCode(tag)
-			}
-			m.setError("model not loaded — press [enter] to load it first")
-		}
-		return m, nil
 	case "c":
+		// Continue the selected model's last OpenCode session (loading first if
+		// needed). No-op with a hint when there's no recorded session.
 		if tag, ok := m.selectedDiskTag(); ok {
-			m = m.enterConfigure(tag)
+			return m.continueSession(tag)
 		}
 		return m, nil
+	case "C":
+		// Continue the most recent OpenCode session across all models.
+		return m.continueGlobal()
 	case "d":
 		// Cycle device mode (auto → cpu-only → gpu-only) for estimation/testing.
 		return m.cycleDevice()
 	case "p":
-		// Pull a model via the onboarding flow (with a trending list).
+		// Preferences: the per-model configure screen (context/GPU/sampler).
+		if tag, ok := m.selectedDiskTag(); ok {
+			m = m.enterConfigure(tag)
+		}
+		return m, nil
+	case "o":
+		// ollama pull — pull a model via the onboarding flow (trending list).
 		m.onboard.dismissed = false
 		m.onboard.done = false
 		m.onboard.cursor = 0
@@ -259,8 +271,9 @@ func (m Model) adjustColumn(dir int) (tea.Model, tea.Cmd) {
 		cfg.ContextLength = contextChoices[clamp(i+dir, 0, len(contextChoices)-1)]
 		m.status = tag + " context → " + contextLabel(cfg.ContextLength)
 	case colNumGPU:
-		i := indexInt(numGPUChoices, cfg.NumGPU)
-		cfg.NumGPU = numGPUChoices[clamp(i+dir, 0, len(numGPUChoices)-1)]
+		choices := m.gpuChoices(tag)
+		i := indexInt(choices, cfg.NumGPU)
+		cfg.NumGPU = choices[clamp(i+dir, 0, len(choices)-1)]
 		m.status = tag + " gpu layers → " + numGPULabel(cfg, m.opts.DeviceMode)
 	case colPreset:
 		presets := store.Presets()

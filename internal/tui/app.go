@@ -3,9 +3,11 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,9 +27,11 @@ type Options struct {
 	AppConfig    store.AppConfig
 	Deps         deps.Report
 	DeviceMode   hw.DeviceMode
-	OpencodeJSON string // resolved target path
-	WorkingDir   string // dir to launch OpenCode in
-	OpencodeBin  string // path/name of opencode binary
+	OpencodeJSON string                // resolved target path
+	WorkingDir   string                // dir to launch OpenCode in
+	OpencodeBin  string                // path/name of opencode binary
+	Trending     []store.TrendingModel // curated/cached trending pull list
+	Recommended  store.Recommended     // benchmark reference (editable)
 	DryRun       bool
 	Verbose      bool
 	Logf         func(string)
@@ -81,9 +85,10 @@ type Model struct {
 	cursorInit bool // dashCursor positioned on the favourite once on startup
 
 	// derived-model / launch tracking
-	launchAfter  string // base tag to open OpenCode on after a (re)load
-	confirm      string // pending delete confirmation (base tag), "" = none
-	loadedPrompt string // just-loaded base tag awaiting "open in OpenCode?" prompt
+	launchAfter   string // base tag to open OpenCode on after a (re)load
+	launchSession string // session id to resume once launchAfter loads ("" = new)
+	confirm       string // pending delete confirmation (base tag), "" = none
+	loadedPrompt  string // just-loaded base tag awaiting "open in OpenCode?" prompt
 
 	// loading-spinner animation
 	spinFrame int
@@ -114,7 +119,18 @@ type actionResultMsg struct {
 	tag    string
 	err    error
 }
-type sessionDoneMsg struct{ err error }
+type sessionDoneMsg struct {
+	err  error
+	base string // model the session ran on (for capturing the session id)
+}
+type sessionCapturedMsg struct {
+	base string
+	ref  *store.SessionRef
+}
+type trendingRefreshedMsg struct {
+	list      []store.TrendingModel
+	fetchedAt int64
+}
 type clearStatusMsg struct{ token int }
 type spinnerTickMsg struct{}
 type pruneResultMsg struct {
@@ -150,8 +166,62 @@ func (m Model) Init() tea.Cmd {
 	if m.screen == screenPrereq {
 		return nil
 	}
-	// Kick off discovery + polling.
-	return tea.Batch(m.pollCmd(), m.listCmd(), tea.Tick(pollInterval, func(time.Time) tea.Msg { return tickMsg{} }))
+	// Kick off discovery + polling, plus a best-effort daily trending refresh.
+	return tea.Batch(m.pollCmd(), m.listCmd(), m.refreshTrendingCmd(),
+		tea.Tick(pollInterval, func(time.Time) tea.Msg { return tickMsg{} }))
+}
+
+const trendingTTL = 24 * time.Hour
+
+// refreshTrendingCmd refreshes the trending list from Ollama's popularity
+// ranking at most once a day. Best-effort: any failure (offline, layout change)
+// leaves the cached/curated list untouched. Returns nil (no-op) when fresh, in
+// dry-run, or with no curated list to reorder.
+func (m Model) refreshTrendingCmd() tea.Cmd {
+	if m.opts.DryRun || len(m.opts.Trending) == 0 {
+		return nil
+	}
+	last := time.Unix(m.opts.AppConfig.TrendingFetched, 0)
+	if time.Since(last) < trendingTTL {
+		return nil
+	}
+	st := m.opts.Store
+	list := append([]store.TrendingModel(nil), m.opts.Trending...)
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		popular, err := server.FetchPopularNames(ctx)
+		if err != nil || len(popular) == 0 {
+			return nil // keep the cached list
+		}
+		reordered := reorderByPopularity(list, popular)
+		_ = st.SaveTrending(reordered)
+		return trendingRefreshedMsg{list: reordered, fetchedAt: time.Now().Unix()}
+	}
+}
+
+// reorderByPopularity stably sorts curated entries so those whose base name
+// (tag before ':') ranks higher in popular come first; unranked entries keep
+// their order at the end. Never drops or invents entries (sizes are preserved).
+func reorderByPopularity(list []store.TrendingModel, popular []string) []store.TrendingModel {
+	rank := make(map[string]int, len(popular))
+	for i, name := range popular {
+		rank[name] = i
+	}
+	const unranked = 1 << 30
+	rankOf := func(tag string) int {
+		base := tag
+		if i := strings.IndexByte(base, ':'); i >= 0 {
+			base = base[:i]
+		}
+		if r, ok := rank[base]; ok {
+			return r
+		}
+		return unranked
+	}
+	out := append([]store.TrendingModel(nil), list...)
+	sort.SliceStable(out, func(i, j int) bool { return rankOf(out[i].Tag) < rankOf(out[j].Tag) })
+	return out
 }
 
 // --- commands ---
@@ -302,6 +372,13 @@ func (m *Model) setError(s string) {
 	m.status = ""
 }
 
+// clearTransient drops the status/error line. Called when the selection moves to
+// a new model so a previous row's edit confirmation doesn't linger on it.
+func (m *Model) clearTransient() {
+	m.status = ""
+	m.errMsg = ""
+}
+
 // scheduleTick re-arms the poll timer.
 func scheduleTick() tea.Cmd {
 	return tea.Tick(pollInterval, func(time.Time) tea.Msg { return tickMsg{} })
@@ -320,6 +397,14 @@ func (m Model) hasPendingLoad() bool {
 		}
 	}
 	return false
+}
+
+// memorySettling reports whether VRAM/RAM readings are mid-transition: a model
+// is loading, or just finished and the next poll hasn't refreshed free memory
+// yet (the "loaded — continue?" prompt frame). During this window fit verdicts
+// and the projection overlay are suppressed so they don't flash a false overflow.
+func (m Model) memorySettling() bool {
+	return m.hasPendingLoad() || m.loadedPrompt != ""
 }
 
 // --- update ---
@@ -390,6 +475,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		delete(m.pending, msg.tag)
 		if msg.err != nil {
 			m.launchAfter = ""
+			m.launchSession = ""
 			m.setError(fmt.Sprintf("%s %s failed: %v", msg.action, msg.tag, msg.err))
 			return m, nil
 		}
@@ -398,8 +484,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Chained "load → open OpenCode" once the (re)load completes.
 			if m.launchAfter == msg.tag {
 				m.launchAfter = ""
+				sess := m.launchSession
+				m.launchSession = ""
 				cmd := m.setStatus("loaded " + msg.tag)
-				mm, exec := m.execOpenCode(msg.tag)
+				mm, exec := m.execOpenCodeSession(msg.tag, sess)
 				return mm, tea.Batch(cmd, m.pollCmd(), exec)
 			}
 			// Otherwise prompt the user to continue into OpenCode.
@@ -440,15 +528,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmd, m.listCmd())
 
 	case sessionDoneMsg:
-		// Resumed from OpenCode. Repoll and report.
+		// Resumed from OpenCode. Repoll, report, and capture the session so it
+		// can be continued later.
 		var note string
 		if msg.err != nil {
 			note = fmt.Sprintf("OpenCode exited: %v", msg.err)
 		} else {
 			note = "Session closed."
 		}
-		cmd := m.setStatus(note)
-		return m, tea.Batch(cmd, m.pollCmd())
+		cmds := []tea.Cmd{m.setStatus(note), m.pollCmd()}
+		if msg.base != "" {
+			cmds = append(cmds, m.captureSessionCmd(msg.base))
+		}
+		return m, tea.Batch(cmds...)
+
+	case sessionCapturedMsg:
+		if msg.ref != nil && msg.ref.ID != "" {
+			cfg := m.ensureConfig(msg.base)
+			cfg.LastSession = msg.ref
+			m.saveConfig(cfg)
+		}
+		return m, nil
+
+	case trendingRefreshedMsg:
+		m.opts.Trending = msg.list
+		m.opts.AppConfig.TrendingFetched = msg.fetchedAt
+		if !m.opts.DryRun {
+			_ = m.opts.Store.SaveAppConfig(m.opts.AppConfig)
+		}
+		return m, nil
 
 	case pullProgressMsg, pullDoneMsg:
 		return m.updateOnboarding(msg)
@@ -607,6 +715,13 @@ func (m Model) loadedByTag(tag string) (server.LoadedModel, bool) {
 // loaded), it (re)loads first and chains the launch via launchAfter; otherwise
 // it execs OpenCode immediately.
 func (m Model) launchOpenCode(base string) (tea.Model, tea.Cmd) {
+	return m.launchOpenCodeSession(base, "")
+}
+
+// launchOpenCodeSession is launchOpenCode with an optional session id to resume
+// (`opencode -s <id>`); "" opens a fresh session. If the model needs a (re)load
+// the session id is remembered and applied once the load completes.
+func (m Model) launchOpenCodeSession(base, sessionID string) (tea.Model, tea.Cmd) {
 	cfg := m.ensureConfig(base)
 	serve := serveTag(base, cfg, m.opts.DeviceMode)
 
@@ -616,14 +731,55 @@ func (m Model) launchOpenCode(base string) (tea.Model, tea.Cmd) {
 	_, actual, loaded := m.loadedFor(base)
 	if !loaded || actual != serve {
 		m.launchAfter = base
+		m.launchSession = sessionID
 		return m.doLoad(base)
 	}
-	return m.execOpenCode(base)
+	return m.execOpenCodeSession(base, sessionID)
 }
 
-// execOpenCode writes opencode.json to point at the model's serve tag, then
-// suspends the TUI and runs OpenCode as a foreground child.
-func (m Model) execOpenCode(base string) (tea.Model, tea.Cmd) {
+// continueSession resumes the model's last recorded OpenCode session, loading
+// the model first if needed.
+func (m Model) continueSession(base string) (tea.Model, tea.Cmd) {
+	cfg := m.ensureConfig(base)
+	if cfg.LastSession == nil || cfg.LastSession.ID == "" {
+		m.setError("no previous OpenCode session for " + base)
+		return m, nil
+	}
+	return m.launchOpenCodeSession(base, cfg.LastSession.ID)
+}
+
+// mostRecentSession returns the model + session ref with the newest recorded
+// session across all models on disk (nil ref when none recorded yet).
+func (m *Model) mostRecentSession() (string, *store.SessionRef) {
+	var bestBase string
+	var best *store.SessionRef
+	for _, dm := range m.disk {
+		ls := m.ensureConfig(dm.Tag).LastSession
+		if ls == nil || ls.ID == "" {
+			continue
+		}
+		if best == nil || ls.Updated > best.Updated {
+			best, bestBase = ls, dm.Tag
+		}
+	}
+	return bestBase, best
+}
+
+// continueGlobal resumes the most recent OpenCode session across all models,
+// loading its model first if needed.
+func (m Model) continueGlobal() (tea.Model, tea.Cmd) {
+	base, ref := m.mostRecentSession()
+	if ref == nil {
+		m.setError("no OpenCode sessions recorded yet")
+		return m, nil
+	}
+	return m.launchOpenCodeSession(base, ref.ID)
+}
+
+// execOpenCodeSession writes opencode.json to point at the model's serve tag,
+// then suspends the TUI and runs OpenCode as a foreground child. A non-empty
+// sessionID resumes that session via `-s`.
+func (m Model) execOpenCodeSession(base, sessionID string) (tea.Model, tea.Cmd) {
 	cfg := m.ensureConfig(base)
 	serve := serveTag(base, cfg, m.opts.DeviceMode)
 
@@ -648,12 +804,48 @@ func (m Model) execOpenCode(base string) (tea.Model, tea.Cmd) {
 	if bin == "" {
 		bin = "opencode"
 	}
-	cmd := exec.Command(bin)
+	var args []string
+	if sessionID != "" {
+		args = append(args, "-s", sessionID)
+	}
+	cmd := exec.Command(bin, args...)
 	cmd.Dir = m.opts.WorkingDir
 	cmd.Env = os.Environ()
 	// tea.ExecProcess suspends the TUI (leaves alt-screen, restores cooked mode),
 	// runs OpenCode as a foreground child, and resumes on exit.
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-		return sessionDoneMsg{err: err}
+		return sessionDoneMsg{err: err, base: base}
 	})
+}
+
+// captureSessionCmd records the most recent OpenCode session in the working dir
+// (read-only: `opencode session list --format json -n 1`) so it can be resumed
+// later. Best-effort — failures are silently dropped.
+func (m Model) captureSessionCmd(base string) tea.Cmd {
+	bin := m.opts.OpencodeBin
+	if bin == "" {
+		bin = "opencode"
+	}
+	dir := m.opts.WorkingDir
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, bin, "session", "list", "--format", "json", "-n", "1")
+		cmd.Dir = dir
+		out, err := cmd.Output()
+		if err != nil {
+			return sessionCapturedMsg{base: base}
+		}
+		var sessions []struct {
+			ID        string `json:"id"`
+			Title     string `json:"title"`
+			Directory string `json:"directory"`
+			Updated   int64  `json:"updated"`
+		}
+		if err := json.Unmarshal(out, &sessions); err != nil || len(sessions) == 0 {
+			return sessionCapturedMsg{base: base}
+		}
+		s := sessions[0]
+		return sessionCapturedMsg{base: base, ref: &store.SessionRef{ID: s.ID, Title: s.Title, Dir: s.Directory, Updated: s.Updated}}
+	}
 }

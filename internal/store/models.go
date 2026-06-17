@@ -20,6 +20,20 @@ type ModelConfig struct {
 	NumGPU     int        `json:"num_gpu"`
 	Residency  Residency  `json:"residency"`
 	Parameters Parameters `json:"parameters"`
+	// LastSession records the most recent OpenCode session launched on this
+	// model, so the dashboard can offer to continue it. nil = none yet.
+	LastSession *SessionRef `json:"last_session,omitempty"`
+}
+
+// SessionRef points at a resumable OpenCode session (continue with
+// `opencode -s <id>`). Captured from `opencode session list` after a session.
+type SessionRef struct {
+	ID    string `json:"id"`
+	Title string `json:"title,omitempty"`
+	Dir   string `json:"dir,omitempty"`
+	// Updated is the session's last-updated time (unix millis, from OpenCode).
+	// Used to pick the most-recent session across all models.
+	Updated int64 `json:"updated,omitempty"`
 }
 
 // AliasFor derives a filesystem-safe alias from a model tag.
