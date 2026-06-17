@@ -58,7 +58,7 @@ func fittingModels(det hw.Detection, limit int) []catalogEntry {
 
 	entries := make([]catalogEntry, 0, len(trendingCatalog))
 	for _, c := range trendingCatalog {
-		u := hw.EstimateUsage(c.ParamsB, "Q4_K_M", 8192)
+		u := hw.EstimateUsage(c.ParamsB, "Q4_K_M", 8192, 0)
 		fits := totalGB <= 0 || u.TotalGB+reserveGB <= totalGB
 		entries = append(entries, catalogEntry{catalogModel: c, EstGB: u.TotalGB, Fits: fits})
 	}

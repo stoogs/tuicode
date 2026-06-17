@@ -78,3 +78,52 @@ func progressBar(frac float64, width int) string {
 	}
 	return style.Render(string(b))
 }
+
+var usedBlockStyle = lipgloss.NewStyle().Foreground(colFg) // white = already used
+
+// stackedBar renders a memory bar: white ▓ for the already-used fraction, then
+// (optionally) a projected fraction in ▒ (accent, or red if it would overflow),
+// then dim ░ for free space.
+func stackedBar(usedFrac, projFrac float64, width int) string {
+	clamp01 := func(f float64) float64 {
+		if f < 0 {
+			return 0
+		}
+		if f > 1 {
+			return 1
+		}
+		return f
+	}
+	if width < 1 {
+		width = 1
+	}
+	usedN := int(clamp01(usedFrac)*float64(width) + 0.5)
+	if usedN > width {
+		usedN = width
+	}
+	projN := int(projFrac*float64(width) + 0.5)
+	overflow := false
+	if usedN+projN > width {
+		projN = width - usedN
+		overflow = true
+	}
+	if projN < 0 {
+		projN = 0
+	}
+	freeN := width - usedN - projN
+
+	rep := func(n int, r rune) string {
+		out := make([]rune, n)
+		for i := range out {
+			out[i] = r
+		}
+		return string(out)
+	}
+	projStyle := accentStyle
+	if overflow {
+		projStyle = badStyle
+	}
+	return usedBlockStyle.Render(rep(usedN, '▓')) +
+		projStyle.Render(rep(projN, '▒')) +
+		dividerStyle.Render(rep(freeN, '░'))
+}

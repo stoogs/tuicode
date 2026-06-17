@@ -59,6 +59,7 @@ type AppConfig struct {
 	DefaultResidency Residency `json:"default_residency"`
 	OpencodeJSON     string    `json:"opencode_json,omitempty"` // chosen target path
 	WorkingDir       string    `json:"working_dir,omitempty"`   // dir to launch OpenCode in
+	Favourite        string    `json:"favourite,omitempty"`     // model tag selected by default on startup
 }
 
 // DefaultAppConfig returns sane defaults.

@@ -66,11 +66,28 @@ func TestParseParamsBillions(t *testing.T) {
 }
 
 func TestBytesPerParamGB(t *testing.T) {
-	if BytesPerParamGB("Q4_K_M") != 0.55 {
-		t.Errorf("Q4 = %v", BytesPerParamGB("Q4_K_M"))
+	// Q8 should cost more per param than Q4, which costs more than Q3.
+	if !(BytesPerParamGB("Q3_K_M") < BytesPerParamGB("Q4_K_M") &&
+		BytesPerParamGB("Q4_K_M") < BytesPerParamGB("Q8_0")) {
+		t.Errorf("expected Q3 < Q4 < Q8, got %v %v %v",
+			BytesPerParamGB("Q3_K_M"), BytesPerParamGB("Q4_K_M"), BytesPerParamGB("Q8_0"))
 	}
-	if BytesPerParamGB("Q8_0") != 1.0 {
-		t.Errorf("Q8 = %v", BytesPerParamGB("Q8_0"))
+}
+
+func TestEstimateUsageUsesFileSize(t *testing.T) {
+	// When the on-disk size is known it drives the weights figure (more accurate
+	// than params×quant), and a bigger context grows the KV term.
+	const gib14 = 14 * gib
+	small := EstimateUsage(14, "Q4_K_M", 8192, gib14)
+	big := EstimateUsage(14, "Q4_K_M", 65536, gib14)
+	if small.WeightsGB < 13.9 || small.WeightsGB > 14.1 {
+		t.Errorf("weights should track file size (~14GB), got %.2f", small.WeightsGB)
+	}
+	if big.KVGB <= small.KVGB {
+		t.Errorf("larger context should grow KV: %.2f vs %.2f", big.KVGB, small.KVGB)
+	}
+	if big.TotalGB <= big.WeightsGB {
+		t.Errorf("total should exceed weights (KV + overhead)")
 	}
 }
 

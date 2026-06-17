@@ -74,8 +74,11 @@ type Model struct {
 	settingsCursor int
 
 	// inline-edit state
-	configs map[string]store.ModelConfig // per-tag config cache (edited inline)
-	pending map[string]string            // base tag → "load"|"unload"|"delete" in flight
+	configs map[string]store.ModelConfig   // per-tag config cache (edited inline)
+	pending map[string]string              // base tag → "load"|"unload"|"delete" in flight
+	details map[string]server.ModelDetails // per-tag `ollama show` cache (model max ctx)
+
+	cursorInit bool // dashCursor positioned on the favourite once on startup
 
 	// derived-model / launch tracking
 	launchAfter  string // base tag to open OpenCode on after a (re)load
@@ -118,6 +121,11 @@ type pruneResultMsg struct {
 	count int
 	err   error
 }
+type showResultMsg struct {
+	tag     string
+	details server.ModelDetails
+	err     error
+}
 
 // New builds the root model and decides the initial screen.
 func New(opts Options) Model {
@@ -126,6 +134,7 @@ func New(opts Options) Model {
 		now:     time.Now(),
 		configs: map[string]store.ModelConfig{},
 		pending: map[string]string{},
+		details: map[string]server.ModelDetails{},
 	}
 	switch {
 	case !opts.Deps.OK():
@@ -199,6 +208,29 @@ func (m Model) deleteCmd(tag string) tea.Cmd {
 		err := be.Delete(ctx, tag)
 		return actionResultMsg{action: "delete", tag: tag, err: err}
 	}
+}
+
+// showCmd fetches `ollama show` details (model max context) for a tag.
+func (m Model) showCmd(tag string) tea.Cmd {
+	be := m.opts.Backend
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		d, err := be.Show(ctx, tag)
+		return showResultMsg{tag: tag, details: d, err: err}
+	}
+}
+
+// ensureDetailsCmd fetches details for the selected model if not already cached.
+func (m Model) ensureDetailsCmd() tea.Cmd {
+	tag, ok := m.selectedDiskTag()
+	if !ok {
+		return nil
+	}
+	if _, have := m.details[tag]; have {
+		return nil
+	}
+	return m.showCmd(tag)
 }
 
 // pruneCmd removes unused derived models and reports the count.
@@ -330,10 +362,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.disk = disk
 		}
+		// Position the cursor on the favourite once, on first load.
+		if !m.cursorInit && len(m.disk) > 0 {
+			m.cursorInit = true
+			if fav := m.opts.AppConfig.Favourite; fav != "" {
+				for i, dm := range m.disk {
+					if dm.Tag == fav {
+						m.dashCursor = i
+					}
+				}
+			}
+		}
 		m.clampCursors()
 		// First-run onboarding: no models on disk → onboarding screen.
 		if msg.err == nil && len(m.disk) == 0 && m.screen == screenDashboard && !m.onboard.dismissed {
 			m.screen = screenOnboarding
+		}
+		return m, m.ensureDetailsCmd()
+
+	case showResultMsg:
+		if msg.err == nil {
+			m.details[msg.tag] = msg.details
 		}
 		return m, nil
 

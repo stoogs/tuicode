@@ -364,6 +364,48 @@ func TestLoadedPromptDismissesOnOtherKey(t *testing.T) {
 	}
 }
 
+func TestFavouriteToggleAndStartupCursor(t *testing.T) {
+	be := &fakeBackend{reachable: true, disk: []server.DiskModel{
+		{Tag: "a:1b", Size: gib}, {Tag: "b:2b", Size: gib}, {Tag: "c:3b", Size: gib},
+	}}
+	opts := testOpts(t, be, true)
+	m := New(opts)
+	m.disk = be.disk
+	m.screen = screenDashboard
+	m.dashCursor = 1 // select b:2b
+
+	// Press f → b:2b becomes the favourite, persisted.
+	model, _ := m.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	mm := model.(Model)
+	if mm.opts.AppConfig.Favourite != "b:2b" {
+		t.Fatalf("favourite = %q, want b:2b", mm.opts.AppConfig.Favourite)
+	}
+	got, _ := opts.Store.LoadAppConfig()
+	if got.Favourite != "b:2b" {
+		t.Errorf("favourite not persisted: %q", got.Favourite)
+	}
+	// Star renders on that row.
+	if !strings.Contains(mm.viewDashboard(), "★") {
+		t.Error("favourite star not rendered")
+	}
+
+	// A fresh model with the favourite set positions the cursor on it at startup.
+	opts2 := opts
+	opts2.AppConfig.Favourite = "c:3b"
+	m2 := New(opts2)
+	model2, _ := m2.Update(listResultMsg{disk: be.disk})
+	if mm2 := model2.(Model); mm2.dashCursor != 2 {
+		t.Errorf("startup cursor = %d, want 2 (the favourite c:3b)", mm2.dashCursor)
+	}
+
+	// Press f again on the favourite → unfavourite.
+	mm.dashCursor = 1
+	model3, _ := mm.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	if model3.(Model).opts.AppConfig.Favourite != "" {
+		t.Error("pressing f on the favourite should clear it")
+	}
+}
+
 func TestUnloadFromDashboard(t *testing.T) {
 	be := &fakeBackend{reachable: true,
 		disk:   []server.DiskModel{{Tag: "a:1b", Size: gib}},

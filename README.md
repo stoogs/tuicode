@@ -13,25 +13,35 @@ you launch on top of a loaded model.
 ```
 tuicode                                            device: auto · GPU 16GB · Ollama ●
 ────────────────────────────────────────────────────────────────────────────────────
-┌─────┬────────────────────┬───────┬─────────────┬─────┬────────┬──────┬──────────────┬────────┐
-│ ST  │ MODEL              │ SIZE  │ PARAMS      │ ON  │ CTX    │ GPU  │ PRESET       │ UNTIL  │
-├─────┼────────────────────┼───────┼─────────────┼─────┼────────┼──────┼──────────────┼────────┤
-│  ●  │ qwen3-coder:30b    │ 9.9GB │ 30B Q4_K_M  │ GPU │ 64k    │ auto │ Coding       │ 15m    │
-│  ○  │ llama3.2:1b        │ 1.2GB │ 1B Q8_0     │ —   │ default│ cpu  │ Balanced     │ —      │
-└─────┴────────────────────┴───────┴─────────────┴─────┴────────┴──────┴──────────────┴────────┘
+┌──┬─────┬────────────────────┬───────┬─────────────┬─────┬────────┬──────┬──────────────┐
+│ ★│ ST  │ MODEL              │ SIZE  │ PARAMS      │ ON  │ CTX    │ GPU  │ PRESET       │
+├──┼─────┼────────────────────┼───────┼─────────────┼─────┼────────┼──────┼──────────────┤
+│ ★│  ●  │ qwen3-coder:30b    │ 9.9GB │ 30B Q4_K_M  │ GPU │ 64k    │ auto │ Coding       │
+│  │  ○  │ llama3.2:1b        │ 1.2GB │ 1B Q8_0     │ —   │ default│ cpu  │ Balanced     │
+└──┴─────┴────────────────────┴───────┴─────────────┴─────┴────────┴──────┴──────────────┘
+
+INFO  qwen3-coder:30b
+  est. mem  14.8GB   weights 8.4 + ctx 64k ≈ 6.0   ✗ needs 16.8, only 14.0 free GPU
+  params     Coding · temp 0.60 · top_p 0.95 · top_k 40
+
 RAM   ▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░  8.6 / 62.7 GB
-VRAM  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░  9.9 / 16 GB
+VRAM  ▓▓▓▓▓▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒  1.9 / 15.9 GB   ▒ +14.8 to load
 
-SESSION  OpenCode not running   [o] open OpenCode on qwen3-coder:30b
-
-[↑↓] model  [←→/tab] column  [,.] change  [⏎/l] load → open  [esc/u] unload  [q] quit
+[↑↓] model  [←→/tab] column  [,.] change  [⏎/l] load → open  [f] ★ favourite  [esc/u] unload
 ```
 
 Everything lives on **one page**. Every model on disk is a row: `●` green = running,
-`◐` yellow = loading, `●` red = stopping/deleting, `○` grey = stopped. The live
-columns (`ON` placement, `UNTIL` auto-unload countdown) update as Ollama
-loads/unloads; the editable columns (`CTX`, `GPU`, `PRESET`) are changed inline.
-`PARAMS` shows parameter size + quant (e.g. `30B Q4_K_M`).
+`◐` yellow = loading, `●` red = stopping/deleting, `○` grey = stopped. The `ON`
+placement column updates as Ollama loads/unloads; the editable columns (`CTX`,
+`GPU`, `PRESET`) are changed inline. `PARAMS` shows parameter size + quant
+(e.g. `30B Q4_K_M`); the `★` column marks your **favourite** (pre-selected on
+startup).
+
+The **INFO** zone estimates the model's memory footprint (weights from the actual
+file size + KV cache for the chosen context) and checks it against *free* VRAM.
+The **VRAM bar** shows already-used memory as white `▓` blocks and previews the
+selected model's footprint as `▒` (red if it would overflow), so you can see
+whether it'll fit before loading.
 
 ### Keys
 
@@ -40,8 +50,10 @@ loads/unloads; the editable columns (`CTX`, `GPU`, `PRESET`) are changed inline.
   (`CTX`, `GPU`, `PRESET`).
 - `,` / `.` — decrease / increase the focused column's value (saved instantly).
   `CTX` steps in 8k; `GPU` sets GPU-offload layers (`auto`/`cpu`/N/`all`).
-- `Enter` or `l` — load the model. `Enter` is **progressive**: once the model is
-  loaded, press it again to open OpenCode on it.
+- `f` — mark the selected model as the **favourite** (the `★`); it's pre-selected
+  on startup. Press again to clear.
+- `Enter` or `l` — load the model. After it loads you get a *"press Enter to
+  continue in OpenCode"* prompt; `Enter` opens it, any other key stays.
 - `esc` / `u` — unload the selected model.
 - `del`/`backspace` — delete the model from disk (asks to confirm; default no).
 - `o` — open OpenCode (same as a second `Enter`) · `c` — full configure screen ·

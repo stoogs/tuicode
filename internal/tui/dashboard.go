@@ -22,11 +22,11 @@ const (
 
 // table layout: column widths and which table columns are editable.
 //
-//	ST MODEL SIZE PARAMS ON CTX GPU PRESET
+//	★ ST MODEL SIZE PARAMS ON CTX GPU PRESET
 var (
-	colWidths      = []int{4, 22, 6, 12, 4, 7, 6, 14}
-	colHeaders     = []string{"ST", "MODEL", "SIZE", "PARAMS", "ON", "CTX", "GPU", "PRESET"}
-	editableIdx    = []int{5, 6, 7} // CTX, GPU, PRESET
+	colWidths      = []int{1, 4, 21, 6, 12, 4, 7, 6, 14}
+	colHeaders     = []string{"★", "ST", "MODEL", "SIZE", "PARAMS", "ON", "CTX", "GPU", "PRESET"}
+	editableIdx    = []int{6, 7, 8} // CTX, GPU, PRESET
 	tableWidthHint = sum(colWidths) + len(colWidths) + 1
 )
 
@@ -103,12 +103,17 @@ func (m Model) viewDashboard() string {
 	b.WriteString(m.renderInfo())
 	b.WriteString("\n\n")
 
-	// Memory bars: system RAM, then VRAM (when a GPU is in play).
-	b.WriteString(m.renderRamBar(barW))
-	b.WriteString("\n")
+	// Memory bars: system RAM, then VRAM (when a GPU is in play). The projected
+	// footprint of the selected, not-yet-loaded model is overlaid on whichever
+	// pool would hold it.
+	proj := m.selectedProjectionGB()
 	if m.detection.GPU != nil {
-		b.WriteString(m.renderVramBar(barW))
+		b.WriteString(m.renderRamBar(barW, 0))
+		b.WriteString("\n")
+		b.WriteString(m.renderVramBar(barW, proj))
 	} else {
+		b.WriteString(m.renderRamBar(barW, proj))
+		b.WriteString("\n")
 		b.WriteString(mutedStyle.Render("VRAM  (no GPU — RAM is authoritative)"))
 	}
 	b.WriteString("\n\n")
@@ -146,10 +151,11 @@ func (m Model) viewDashboard() string {
 		[2]string{"←→/tab", "column"},
 		[2]string{",.", "change"},
 		[2]string{"⏎/l", "load → open"},
-		[2]string{"o", "open"},
+		[2]string{"f", "★ favourite"},
 	))
 	b.WriteString("\n")
 	b.WriteString(footer(
+		[2]string{"o", "open"},
 		[2]string{"esc/u", "unload"},
 		[2]string{"d", "device"},
 		[2]string{"c", "configure"},
@@ -225,26 +231,33 @@ func (m Model) renderRow(i int, dm server.DiskModel) string {
 	lm, _, loaded := m.loadedFor(dm.Tag)
 	selected := i == m.dashCursor
 
-	glyph, gstyle := m.stateGlyph(dm.Tag)
-	stateCell := gstyle.Render(center(glyph, colWidths[0]))
+	// favourite star column
+	star := " "
+	if dm.Tag == m.opts.AppConfig.Favourite {
+		star = "★"
+	}
+	starCell := warnStyle.Render(center(star, colWidths[0]))
 
-	modelText := cell(dm.Tag, colWidths[1])
+	glyph, gstyle := m.stateGlyph(dm.Tag)
+	stateCell := gstyle.Render(center(glyph, colWidths[1]))
+
+	modelText := cell(dm.Tag, colWidths[2])
 	modelCell := modelText
 	if selected {
 		modelCell = accentStyle.Render(modelText)
 	}
 
-	sizeCell := cell(fmtGBShort(dm.Size), colWidths[2])
+	sizeCell := cell(fmtGBShort(dm.Size), colWidths[3])
 
 	// params/quant column, e.g. "7B Q4_K_M"
-	paramsCell := cell(paramsQuant(dm), colWidths[3])
+	paramsCell := cell(paramsQuant(dm), colWidths[4])
 
 	// live placement column (where the resident instance runs)
 	onStr := "—"
 	if loaded {
 		onStr = shortProc(lm)
 	}
-	onCell := cell(onStr, colWidths[4])
+	onCell := cell(onStr, colWidths[5])
 
 	// editable values, in the same order as editableIdx (CTX, GPU, PRESET)
 	ctxStr := contextShort(cfg.ContextLength)
@@ -273,7 +286,7 @@ func (m Model) renderRow(i int, dm server.DiskModel) string {
 	}
 
 	cells := []string{
-		stateCell, modelCell, sizeCell, paramsCell, onCell,
+		starCell, stateCell, modelCell, sizeCell, paramsCell, onCell,
 		editCells[0], editCells[1], editCells[2],
 	}
 	var out strings.Builder
@@ -338,12 +351,14 @@ func numGPULabel(cfg store.ModelConfig, mode hw.DeviceMode) string {
 	}
 }
 
-// modelMeta returns the best-known params (billions) and quant for a tag.
-func (m Model) modelMeta(tag string) (float64, string) {
+// modelMeta returns the best-known params (billions), quant, and on-disk size
+// (bytes) for a tag.
+func (m Model) modelMeta(tag string) (paramsB float64, quant string, sizeBytes int64) {
 	cfg := m.ensureConfig(tag)
-	paramsB, quant := cfg.ParamsBillions, cfg.Quant
+	paramsB, quant = cfg.ParamsBillions, cfg.Quant
 	for _, dm := range m.disk {
 		if dm.Tag == tag {
+			sizeBytes = dm.Size
 			if paramsB == 0 {
 				paramsB = hw.ParseParamsBillions(dm.ParamSize)
 			}
@@ -352,7 +367,20 @@ func (m Model) modelMeta(tag string) (float64, string) {
 			}
 		}
 	}
-	return paramsB, quant
+	return paramsB, quant, sizeBytes
+}
+
+// ctxNote describes the context for the INFO line. For a default context it
+// notes the ~4k Ollama loads at plus the model's max (from `ollama show`).
+func (m Model) ctxNote(tag string, ctx int) string {
+	if ctx > 0 {
+		return contextShort(ctx)
+	}
+	s := "default ~4k"
+	if d, ok := m.details[tag]; ok && d.ContextLength > 0 {
+		s += " · max " + contextShort(d.ContextLength)
+	}
+	return s
 }
 
 // renderInfo renders the information zone for the selected model. It always
@@ -368,13 +396,15 @@ func (m Model) renderInfo() string {
 	}
 
 	cfg := m.ensureConfig(tag)
-	paramsB, quant := m.modelMeta(tag)
-	usage := hw.EstimateUsage(paramsB, quant, cfg.ContextLength)
+	paramsB, quant, size := m.modelMeta(tag)
+	usage := hw.EstimateUsage(paramsB, quant, cfg.ContextLength, size)
 
 	mem := m.detection.Authoritative()
 	totalGB := float64(mem.Total) / gib
+	freeGB := float64(mem.Free) / gib
 	reserveGB := float64(m.detection.Reserve()) / gib
 	src := strings.ToUpper(mem.Source)
+	_, _, loaded := m.loadedFor(tag)
 
 	var b strings.Builder
 	b.WriteString(sectionStyle.Render("INFO  ") + accentStyle.Render(tag) + "\n")
@@ -387,16 +417,21 @@ func (m Model) renderInfo() string {
 	if !usage.Known {
 		b.WriteString("  " + mutedStyle.Render("est. mem   unknown (params/quant not detected)") + "\n")
 	} else {
-		ctxNote := contextShort(cfg.ContextLength)
-		est := fmt.Sprintf("est. mem   %.1fGB   weights %.1f + ctx(%s) %.1f",
-			usage.TotalGB, usage.WeightsGB, ctxNote, usage.KVGB)
+		est := fmt.Sprintf("est. mem  %.1fGB   weights %.1f + ctx %s ≈ %.1f",
+			usage.TotalGB, usage.WeightsGB, m.ctxNote(tag, cfg.ContextLength), usage.KVGB)
 		fit := ""
-		if totalGB > 0 {
-			if usage.TotalGB+reserveGB <= totalGB {
-				fit = goodStyle.Render(fmt.Sprintf("   fits %.0fGB %s ✓", totalGB, src))
-			} else {
-				fit = warnStyle.Render(fmt.Sprintf("   may spill to CPU (> %.0fGB %s)", totalGB, src))
+		switch {
+		case loaded:
+			fit = mutedStyle.Render("   (loaded)")
+		case freeGB <= 0:
+			// no live free figure; fall back to total
+			if usage.TotalGB+reserveGB > totalGB {
+				fit = warnStyle.Render("   may not fit")
 			}
+		case usage.TotalGB+reserveGB <= freeGB:
+			fit = goodStyle.Render(fmt.Sprintf("   ✓ fits (%.1f free %s)", freeGB, src))
+		default:
+			fit = badStyle.Render(fmt.Sprintf("   ✗ needs %.1f, only %.1f free %s", usage.TotalGB+reserveGB, freeGB, src))
 		}
 		b.WriteString("  " + estStyle.Render(est) + fit + "\n")
 	}
@@ -448,27 +483,34 @@ func (m Model) renderSession() string {
 	return label + "   " + mutedStyle.Render("(load "+tag+" to open a session)")
 }
 
-// renderRamBar renders the system-RAM usage bar (MemAvailable vs MemTotal).
-func (m Model) renderRamBar(w int) string {
-	ram := m.detection.RAM
-	totalGB := float64(ram.Total) / gib
+// memBar renders a labeled memory bar: white = already used, accent ▒ = the
+// projected footprint of the selected (unloaded) model, dim = free. projGB == 0
+// draws just used/free.
+func memBar(label string, usedGB, totalGB, projGB float64, w int) string {
 	if totalGB <= 0 {
-		return mutedStyle.Render("RAM   (unknown)")
+		return mutedStyle.Render(label + "  (unknown)")
 	}
+	bar := stackedBar(usedGB/totalGB, projGB/totalGB, barWidth(w))
+	s := fmt.Sprintf("%s  %s  %s / %s GB", label, bar, fmtGBf(usedGB), fmtGBf(totalGB))
+	if projGB > 0 {
+		s += mutedStyle.Render(fmt.Sprintf("   ▒ +%.1f to load", projGB))
+	}
+	return s
+}
+
+// renderRamBar renders the system-RAM usage bar (MemAvailable vs MemTotal).
+func (m Model) renderRamBar(w int, projGB float64) string {
+	ram := m.detection.RAM
 	usedGB := float64(ram.Total-ram.Free) / gib
-	return fmt.Sprintf("RAM   %s  %s / %s GB", progressBar(usedGB/totalGB, barWidth(w)), fmtGBf(usedGB), fmtGBf(totalGB))
+	return memBar("RAM ", usedGB, float64(ram.Total)/gib, projGB, w)
 }
 
 // renderVramBar renders the GPU VRAM usage bar from nvidia-smi (or summed
 // footprints when free VRAM is unavailable).
-func (m Model) renderVramBar(w int) string {
+func (m Model) renderVramBar(w int, projGB float64) string {
 	g := m.detection.GPU
 	if g == nil {
 		return mutedStyle.Render("VRAM  (no GPU)")
-	}
-	totalGB := g.TotalGB()
-	if totalGB <= 0 {
-		return mutedStyle.Render("VRAM  (unknown)")
 	}
 	var usedGB float64
 	if g.Free > 0 {
@@ -480,7 +522,27 @@ func (m Model) renderVramBar(w int) string {
 		}
 		usedGB = float64(s) / gib
 	}
-	return fmt.Sprintf("VRAM  %s  %s / %s GB", progressBar(usedGB/totalGB, barWidth(w)), fmtGBf(usedGB), fmtGBf(totalGB))
+	return memBar("VRAM", usedGB, g.TotalGB(), projGB, w)
+}
+
+// selectedProjectionGB is the estimated footprint of the selected model when it
+// is not yet loaded (0 when loaded or unknown) — used to preview the load on the
+// memory bar.
+func (m Model) selectedProjectionGB() float64 {
+	tag, ok := m.selectedDiskTag()
+	if !ok {
+		return 0
+	}
+	if _, _, loaded := m.loadedFor(tag); loaded {
+		return 0
+	}
+	cfg := m.ensureConfig(tag)
+	pB, q, sz := m.modelMeta(tag)
+	u := hw.EstimateUsage(pB, q, cfg.ContextLength, sz)
+	if !u.Known {
+		return 0
+	}
+	return u.TotalGB
 }
 
 func barWidth(w int) int {

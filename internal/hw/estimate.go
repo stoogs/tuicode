@@ -5,27 +5,29 @@ import (
 	"strings"
 )
 
-// BytesPerParamGB returns the rough (generous) GB-per-billion-params footprint
-// for a quantization level. Q4≈0.55, Q5≈0.65, Q6≈0.8, Q8≈1.0.
+// BytesPerParamGB returns the GB-per-billion-params weight footprint for a
+// quantization level, including format overhead (calibrated to observed VRAM).
+// Used only as a fallback when the on-disk file size is unknown — prefer the
+// real file size when available.
 func BytesPerParamGB(quant string) float64 {
 	q := strings.ToUpper(quant)
 	switch {
 	case strings.Contains(q, "Q2"):
-		return 0.40
+		return 0.45
 	case strings.Contains(q, "Q3"):
-		return 0.48
-	case strings.Contains(q, "Q4"):
 		return 0.55
-	case strings.Contains(q, "Q5"):
+	case strings.Contains(q, "Q4"):
 		return 0.65
+	case strings.Contains(q, "Q5"):
+		return 0.75
 	case strings.Contains(q, "Q6"):
-		return 0.80
+		return 0.90
 	case strings.Contains(q, "Q8"):
-		return 1.00
+		return 1.10
 	case strings.Contains(q, "F16"), strings.Contains(q, "FP16"), strings.Contains(q, "BF16"):
-		return 2.00
+		return 2.10
 	default:
-		return 0.65 // unknown → assume Q5-ish
+		return 0.75 // unknown → assume Q5-ish
 	}
 }
 
@@ -145,25 +147,49 @@ type Usage struct {
 	Known     bool    // false when params/quant unknown (estimate not meaningful)
 }
 
+// kvCoeffPer1kPerB is the KV-cache GB per 1k tokens per billion params, with
+// fp16 KV (no cache quantization). Calibrated against observed VRAM (e.g. a 14B
+// model at 64k uses ~5–6GB of KV). Models with aggressive GQA use less; this errs
+// generous so the estimate doesn't undershoot and surprise users with OOM/spill.
+const kvCoeffPer1kPerB = 0.0065
+
+// computeOverheadGB is the roughly-fixed compute/activation buffer overhead.
+const computeOverheadGB = 0.5
+
+// defaultCtxForBaseline is the context Ollama loads at when none is specified.
+const defaultCtxForBaseline = 4096
+
 // EstimateUsage projects VRAM/RAM usage for a model loaded at the given context.
-// context <= 0 means the model's default; we assume a nominal 4k for the KV term
-// so "default" still shows a sensible baseline. Uses the same gb_per_1k heuristic
-// as EstimateContext, so changing the context changes the KV term linearly.
-func EstimateUsage(paramsB float64, quant string, context int) Usage {
-	if paramsB <= 0 {
+// weightsBytes is the model's on-disk size (the most accurate weight footprint);
+// pass 0 to fall back to a params×quant estimate. context <= 0 means the model's
+// default (a nominal 4k for the KV term).
+func EstimateUsage(paramsB float64, quant string, context int, weightsBytes int64) Usage {
+	weights := float64(weightsBytes) / gib
+	if weights <= 0 {
+		if paramsB <= 0 {
+			return Usage{Known: false}
+		}
+		weights = paramsB * BytesPerParamGB(quant)
+	}
+	if paramsB <= 0 && weightsBytes <= 0 {
 		return Usage{Known: false}
 	}
-	weights := paramsB * BytesPerParamGB(quant)
+
 	ctx := context
 	if ctx <= 0 {
-		ctx = 4096 // nominal default for the baseline KV estimate
+		ctx = defaultCtxForBaseline
 	}
-	gbPer1k := paramsB * 0.0021
-	kv := float64(ctx) / 1000.0 * gbPer1k
+	// KV scales with params; when params are unknown, approximate from weights.
+	pB := paramsB
+	if pB <= 0 {
+		pB = weights / 0.65
+	}
+	kv := float64(ctx) / 1000.0 * pB * kvCoeffPer1kPerB
+
 	return Usage{
 		WeightsGB: weights,
 		KVGB:      kv,
-		TotalGB:   weights + kv,
+		TotalGB:   weights + kv + computeOverheadGB,
 		Known:     true,
 	}
 }

@@ -43,10 +43,27 @@ func (m Model) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.dashCursor > 0 {
 			m.dashCursor--
 		}
-		return m, nil
+		return m, m.ensureDetailsCmd()
 	case "down", "j":
 		if m.dashCursor < len(m.disk)-1 {
 			m.dashCursor++
+		}
+		return m, m.ensureDetailsCmd()
+
+	// toggle favourite (selected on startup); only one favourite at a time
+	case "f":
+		if tag, ok := m.selectedDiskTag(); ok {
+			if m.opts.AppConfig.Favourite == tag {
+				m.opts.AppConfig.Favourite = ""
+				m.status = "unfavourited " + tag
+			} else {
+				m.opts.AppConfig.Favourite = tag
+				m.status = "★ favourite → " + tag
+			}
+			m.errMsg = ""
+			if !m.opts.DryRun {
+				_ = m.opts.Store.SaveAppConfig(m.opts.AppConfig)
+			}
 		}
 		return m, nil
 
