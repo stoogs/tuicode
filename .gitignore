@@ -1,0 +1,8 @@
+# build output
+/tuicode
+*.test
+
+# editor / tooling
+.claude/
+.idea/
+.vscode/
