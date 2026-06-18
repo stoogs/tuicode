@@ -1,7 +1,14 @@
 {
-  "_comment": "Benchmark reference for choosing a model. mem_gb = RAM+VRAM used; gpu_percent = share of the model on the GPU (100 = fully on GPU, lower = spills to CPU). Edit freely — tuicode never overwrites this file. Source: glukhov.org LLM performance benchmarks for a 16GB-VRAM GPU (2026). ref_gpu_gb documents the GPU the figures were measured on.",
+  "_comment": "Benchmark reference for choosing a model. mem_gb = RAM+VRAM used; gpu_percent = share of the model on the GPU (100 = fully on GPU, lower = spills to CPU). Edit freely — tuicode never overwrites this file, and tops up new curated picks by tag at load (your edits to existing tags win). Source: glukhov.org LLM performance benchmarks for a 16GB-VRAM GPU (2026). ref_gpu_gb documents the GPU the figures were measured on.",
   "ref_gpu_gb": 16,
   "models": [
+    {"tag": "qwen2.5-coder:1.5b", "mem_gb": 2, "gpu_percent": 100, "note": "coding · tiny"},
+    {"tag": "qwen2.5-coder:3b", "mem_gb": 3, "gpu_percent": 100, "note": "coding"},
+    {"tag": "qwen3:4b", "mem_gb": 4, "gpu_percent": 100, "note": "general · fast"},
+    {"tag": "qwen2.5-coder:7b", "mem_gb": 6, "gpu_percent": 100, "note": "coding"},
+    {"tag": "deepseek-r1:7b", "mem_gb": 6, "gpu_percent": 100, "note": "reasoning"},
+    {"tag": "qwen3:8b", "mem_gb": 7, "gpu_percent": 100, "note": "general"},
+    {"tag": "llama3.1:8b", "mem_gb": 7, "gpu_percent": 100, "note": "general"},
     {"tag": "gpt-oss:20b", "mem_gb": 14, "gpu_percent": 100, "note": "MoE"},
     {"tag": "qwen3.5:9b", "mem_gb": 9.3, "gpu_percent": 100},
     {"tag": "ministral-3:14b", "mem_gb": 13, "gpu_percent": 100},

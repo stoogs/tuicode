@@ -2,7 +2,6 @@ package tui
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -34,7 +33,7 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.pruneCmd()
 		case setOllamaModels:
 			dir := ollamaModelsDir()
-			if err := exec.Command("xdg-open", dir).Start(); err != nil {
+			if err := openPath(dir); err != nil {
 				m.setError("open file manager failed: " + err.Error())
 			} else {
 				m.status = "opened " + dir
@@ -132,17 +131,40 @@ func (m Model) viewSettings() string {
 		b.WriteString(cursor + label + val + "\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("OLLAMA_MODELS / flash-attn / KV-cache are daemon-level (env on the ollama"))
+	d := m.opts.Deps.Distro
+	b.WriteString(mutedStyle.Render("OLLAMA_MODELS / flash-attn / KV-cache are read by the Ollama daemon at startup —"))
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("service); values shown are this shell's view. Set them via a systemd override:"))
+	b.WriteString(mutedStyle.Render("restarting tuicode won't apply them (it's just a client). The values above are"))
 	b.WriteString("\n")
-	b.WriteString("  " + accentStyle.Render("sudo systemctl edit ollama") + mutedStyle.Render("  →  [Service]"))
+	b.WriteString(mutedStyle.Render("read-only here; set them on the daemon, then restart Ollama:"))
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("    Environment=\"OLLAMA_FLASH_ATTENTION=1\" \"OLLAMA_KV_CACHE_TYPE=q8_0\""))
+	if d.IsMac() {
+		// Per-var launchctl; the menu-bar app reads these on (re)launch. KV-cache
+		// quant is ignored unless flash-attn is on, so that one comes first.
+		b.WriteString("  " + accentStyle.Render("launchctl setenv OLLAMA_FLASH_ATTENTION 1") + mutedStyle.Render("     ← set this first"))
+		b.WriteString("\n")
+		b.WriteString("  " + accentStyle.Render("launchctl setenv OLLAMA_KV_CACHE_TYPE q8_0") + mutedStyle.Render("    ← needs flash-attn on"))
+		b.WriteString("\n")
+	} else {
+		// One systemd override sets both at once (so flash-attn is already on).
+		b.WriteString("  " + accentStyle.Render("sudo systemctl edit ollama") + mutedStyle.Render("   →   [Service]"))
+		b.WriteString("\n")
+		b.WriteString(mutedStyle.Render(`    Environment="OLLAMA_FLASH_ATTENTION=1" "OLLAMA_KV_CACHE_TYPE=q8_0"`))
+		b.WriteString("\n")
+	}
+	b.WriteString("  " + mutedStyle.Render("restart: ") + accentStyle.Render(d.DaemonRestartCmd()))
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("  Flash-attn + KV-cache q8_0/q4_0 roughly halve/quarter context VRAM — big"))
+	mem := "context VRAM"
+	tail := "  context. Per-model GPU layers: the GPU column."
+	if m.detection.Unified {
+		// Apple Silicon: KV cache lives in unified memory, and the GPU column only
+		// hurts (no memory split).
+		mem = "context memory"
+		tail = "  context in unified memory (the GPU column doesn't help)."
+	}
+	b.WriteString(mutedStyle.Render("  Flash-attn + KV-cache q8_0/q4_0 ≈ half/quarter the " + mem + " — fits larger"))
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("  gains for fitting larger context. Per-model GPU layers: the GPU column."))
+	b.WriteString(mutedStyle.Render(tail))
 	b.WriteString("\n\n")
 
 	if sl := m.statusLine(); sl != "" {
@@ -159,11 +181,15 @@ func (m Model) viewSettings() string {
 	return boxWrap(b.String(), m)
 }
 
-// envStatus reports an env var's value as this process sees it (best-effort —
-// the daemon may have a different environment).
+// envStatus reports an env var's effective value for display (read-only — set it
+// on the daemon, see the note below the table). On macOS it prefers the value set
+// via `launchctl setenv` (what the Ollama app inherits) over this shell's env.
 func envStatus(key string) string {
+	if v, ok := launchdEnv(key); ok {
+		return v + "  (launchctl)"
+	}
 	if v := os.Getenv(key); v != "" {
-		return v
+		return v + "  (this shell)"
 	}
 	return "not set (daemon default)"
 }

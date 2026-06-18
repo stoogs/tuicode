@@ -48,9 +48,12 @@ func (m Model) header() string {
 	var parts []string
 	parts = append(parts, "device: "+string(m.opts.DeviceMode))
 	det := m.detection
-	if det.GPU != nil {
+	switch {
+	case det.Unified && det.GPU != nil:
+		parts = append(parts, fmt.Sprintf("Unified %.0fGB", det.GPU.TotalGB()))
+	case det.GPU != nil:
 		parts = append(parts, fmt.Sprintf("GPU %.0fGB", det.GPU.TotalGB()))
-	} else {
+	default:
 		parts = append(parts, fmt.Sprintf("RAM %.0fGB", det.RAM.TotalGB()))
 	}
 	parts = append(parts, "Ollama "+dot(m.daemon.Reachable))
@@ -91,7 +94,7 @@ func (m Model) viewDashboard() string {
 		b.WriteString(mutedStyle.Render("connecting to Ollama…"))
 	case !m.daemon.Reachable:
 		b.WriteString(badStyle.Render("Ollama daemon not reachable — ") +
-			accentStyle.Render("sudo systemctl start ollama"))
+			accentStyle.Render(m.opts.Deps.Distro.DaemonStartCmd()))
 	default:
 		b.WriteString(mutedStyle.Render(fmt.Sprintf("%d model(s) on disk · %d loaded", len(m.disk), len(m.loaded))))
 	}
@@ -109,11 +112,17 @@ func (m Model) viewDashboard() string {
 	// footprint of the selected, not-yet-loaded model is overlaid on whichever
 	// pool would hold it.
 	proj := m.selectedProjectionGB()
-	if m.detection.GPU != nil {
+	switch {
+	case m.detection.Unified:
+		// Apple Silicon: GPU and CPU share one pool — a single bar, not two.
+		b.WriteString(m.renderUnifiedBar(barW, proj))
+		b.WriteString("\n")
+		b.WriteString(mutedStyle.Render(m.detection.GPUName + " · unified memory (GPU shares system RAM)"))
+	case m.detection.GPU != nil:
 		b.WriteString(m.renderRamBar(barW, 0))
 		b.WriteString("\n")
 		b.WriteString(m.renderVramBar(barW, proj))
-	} else {
+	default:
 		b.WriteString(m.renderRamBar(barW, proj))
 		b.WriteString("\n")
 		b.WriteString(mutedStyle.Render("VRAM  (no GPU — RAM is authoritative)"))
@@ -405,9 +414,12 @@ func (m Model) modelMeta(tag string) (paramsB float64, quant string, sizeBytes i
 func (m Model) reclaimableGB(source string) float64 {
 	var b int64
 	for _, lm := range m.loaded {
-		if source == "gpu" {
+		switch source {
+		case "gpu":
 			b += lm.SizeVRAM
-		} else {
+		case "unified":
+			b += lm.Size // one pool — the whole model is reclaimable
+		default: // "ram"
 			b += lm.Size - lm.SizeVRAM
 		}
 	}
@@ -503,9 +515,29 @@ func (m Model) renderInfo() string {
 		if reclaimGB > 0.1 {
 			swap = " after unload"
 		}
+		noLive := freeGB <= 0 && reclaimGB <= 0
 		fit := ""
 		switch {
-		case freeGB <= 0 && reclaimGB <= 0:
+		case m.detection.Unified:
+			// Unified memory has two distinct limits. The hard one is the
+			// Metal-addressable ceiling (total − reserve ≈ 70%): above it the model
+			// genuinely can't be GPU-resident. The soft one is currently-free pages:
+			// below the ceiling but above free, macOS reclaims/compresses to load it
+			// — it works, just under pressure — so that's a ⚠, not a ✗. (The live
+			// `available` figure already nets out the OS/apps, so we don't add the
+			// reserve to the requirement here.)
+			ceilGB := totalGB - reserveGB
+			switch {
+			case usage.TotalGB > ceilGB:
+				fit = badStyle.Render(fmt.Sprintf("   ✗ exceeds usable %s (needs %.1f, cap %.1f)", src, usage.TotalGB, ceilGB))
+			case noLive:
+				// no live free figure, but within the ceiling — assume it loads.
+			case usage.TotalGB <= avail:
+				fit = goodStyle.Render(fmt.Sprintf("   ✓ fits (%.1f %s free%s)", avail, src, swap))
+			default:
+				fit = warnStyle.Render(fmt.Sprintf("   ⚠ tight — %.1f %s free, macOS reclaims to load", avail, src))
+			}
+		case noLive:
 			// no live free figure; fall back to total
 			if usage.TotalGB+reserveGB > totalGB {
 				fit = warnStyle.Render("   may not fit")
@@ -521,7 +553,11 @@ func (m Model) renderInfo() string {
 	// --- CPU/GPU split + VRAM line (green while the GPU column is focused) ---
 	// Live placement when loaded; otherwise the benchmark reference for the tag.
 	if m.memorySettling() {
-		b.WriteString("  " + mutedStyle.Render("split     measuring… (loading)") + "\n")
+		label := "split"
+		if m.detection.Unified {
+			label = "place"
+		}
+		b.WriteString("  " + mutedStyle.Render(label+"     measuring… (loading)") + "\n")
 		b.WriteString(m.infoParamsLine(cfg))
 		return b.String()
 	}
@@ -554,6 +590,11 @@ func (m Model) infoParamsLine(cfg store.ModelConfig) string {
 // configured offload setting otherwise.
 func (m Model) splitLine(tag string, lm server.LoadedModel, loaded bool) string {
 	if loaded {
+		if m.detection.Unified {
+			// Unified memory: no VRAM-vs-RAM split. Show measured placement only.
+			return fmt.Sprintf("place     %s · %.1fGB  (live)",
+				lm.Processor(), float64(lm.SizeVRAM)/gib)
+		}
 		return fmt.Sprintf("split     %s · %.1fGB VRAM  (live)",
 			lm.Processor(), float64(lm.SizeVRAM)/gib)
 	}
@@ -580,13 +621,23 @@ func (m Model) splitLine(tag string, lm server.LoadedModel, loaded bool) string 
 // you dial the `GPU` column in and see the likely outcome live. ok=false when we
 // lack the layer count or a usable footprint estimate.
 func (m Model) predictSplit(tag string) (string, bool) {
-	d, ok := m.details[tag]
-	if !ok || d.BlockCount <= 0 {
-		return "", false
-	}
 	cfg := m.ensureConfig(tag)
 	u := m.usageFor(tag, cfg.ContextLength)
 	if !u.Known || u.TotalGB <= 0 {
+		return "", false
+	}
+	if m.detection.Unified {
+		// Unified memory is one pool, so there's no VRAM-overflow CPU/GPU split —
+		// the whole model runs on the GPU (Metal). The only ceiling is Metal's
+		// ~70% wired limit; above it, layers fall back to the CPU (slower, same
+		// memory) unless iogpu.wired_limit_mb is raised.
+		if ceil := gpuCeilGB(m.detection); ceil > 0 && u.TotalGB > ceil {
+			return fmt.Sprintf("place     GPU (Metal) · ~%.1fGB · past ~70%% wired limit (slower)", u.TotalGB), true
+		}
+		return fmt.Sprintf("place     GPU (Metal) · ~%.1fGB  (unified — no CPU split)", u.TotalGB), true
+	}
+	d, ok := m.details[tag]
+	if !ok || d.BlockCount <= 0 {
 		return "", false
 	}
 	layers := d.BlockCount
@@ -615,11 +666,22 @@ func (m Model) predictSplit(tag string) (string, bool) {
 		splitLabel(int(frac*100+0.5)), predVRAM, how, gpuLayers, layers), true
 }
 
-// freeVRAMGB is the GPU memory available for offload right now (0 = no GPU).
+// freeVRAMGB is the GPU memory available for layer offload (0 = no GPU).
 func (m Model) freeVRAMGB() float64 {
 	g := m.detection.GPU
 	if g == nil {
 		return 0
+	}
+	if m.detection.Unified {
+		// Apple Silicon: Ollama offloads to the GPU up to Metal's wired limit (a
+		// fraction of *total* RAM ≈ total − reserve), and macOS reclaims pages to
+		// make room — it isn't bounded by currently-free memory the way a discrete
+		// card's VRAM is. Using live-free here wrongly predicts a CPU-heavy split.
+		budget := float64(g.Total - m.detection.Reserve())
+		if budget < 0 {
+			budget = 0
+		}
+		return budget / gib
 	}
 	avail := g.Free
 	if avail <= 0 {
@@ -813,6 +875,31 @@ func (m Model) renderVramBar(w int, projGB float64) string {
 		modelGB = 0
 	}
 	return memBar("VRAM", usedGB, modelGB, g.TotalGB(), projGB, w)
+}
+
+// renderUnifiedBar renders the single unified-memory bar for Apple Silicon,
+// where the GPU and CPU share one physical pool. The live free figure (from
+// vm_stat) includes the OS and other apps, so it reflects real headroom.
+func (m Model) renderUnifiedBar(w int, projGB float64) string {
+	g := m.detection.GPU
+	if g == nil {
+		return mutedStyle.Render("Mem  (unknown)")
+	}
+	modelGB := m.reclaimableGB("unified")
+	usedGB := modelGB
+	if g.Free > 0 {
+		usedGB = float64(g.Total-g.Free) / gib
+	}
+	if projGB > 0 {
+		// Previewing a swap-in: the resident model unloads first, freeing its
+		// share, so draw the projection into that space rather than stacked on it.
+		usedGB -= modelGB
+		if usedGB < 0 {
+			usedGB = 0
+		}
+		modelGB = 0
+	}
+	return memBar("Mem ", usedGB, modelGB, g.TotalGB(), projGB, w)
 }
 
 // selectedProjectionGB is the estimated footprint of the selected model when it

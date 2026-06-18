@@ -15,19 +15,44 @@ type catalogEntry struct {
 	VRAMFit bool // fits entirely in VRAM (runs fully on the GPU — fastest)
 }
 
-// runCeilingGB is the memory a model can occupy and still run: system RAM, since
-// Ollama offloads to RAM whatever doesn't fit in VRAM (a CPU/GPU split). VRAM
-// alone is too strict — it would hide models that run fine, just slower.
-func runCeilingGB(det hw.Detection) float64 {
-	if det.RAM.Total > 0 {
-		return float64(det.RAM.Total) / gib
+// unifiedRunFloorGB is the OS minimum kept free on unified memory even when a
+// model splits to CPU. Unlike a discrete box, "split" adds no capacity here — the
+// CPU layers use the same pool — so the run ceiling is total RAM minus this small
+// floor, not the larger GPU headroom (det.Reserve()).
+const unifiedRunFloorGB = 1.5
+
+// runCeilGB is the footprint a model can occupy and still run (CPU/GPU split
+// allowed). On a discrete-GPU/CPU box that's system RAM minus headroom, since
+// Ollama spills to the separate RAM pool. On unified memory there's one pool, so
+// it's total RAM minus a small OS floor. 0 = memory unknown.
+func runCeilGB(det hw.Detection) float64 {
+	total := float64(det.RAM.Total) / gib
+	if total <= 0 {
+		total = det.Authoritative().TotalGB()
 	}
-	return float64(det.Authoritative().Total) / gib
+	if total <= 0 {
+		return 0
+	}
+	floor := float64(det.Reserve()) / gib
+	if det.Unified {
+		floor = unifiedRunFloorGB
+	}
+	if c := total - floor; c > 0 {
+		return c
+	}
+	return 0
 }
 
-func vramGB(det hw.Detection) float64 {
-	if det.GPU != nil {
-		return float64(det.GPU.Total) / gib
+// gpuCeilGB is the footprint that runs entirely on the GPU (fastest). For a
+// discrete card that's VRAM minus headroom; for unified memory it's Metal's
+// wired limit (total − reserve ≈ 70%). 0 = no GPU.
+func gpuCeilGB(det hw.Detection) float64 {
+	g := det.GPU
+	if g == nil {
+		return 0
+	}
+	if c := float64(g.Total-det.Reserve()) / gib; c > 0 {
+		return c
 	}
 	return 0
 }
@@ -39,22 +64,21 @@ func vramGB(det hw.Detection) float64 {
 // is unknown the first `limit` entries are returned unfiltered (preserving the
 // popularity ordering from the daily refresh).
 func fittingModels(trending []store.TrendingModel, det hw.Detection, limit int) []catalogEntry {
-	ceil := runCeilingGB(det)
-	reserveGB := float64(det.Reserve()) / gib
-	vram := vramGB(det)
+	runCeil := runCeilGB(det)
+	gpuCeil := gpuCeilGB(det)
 
 	entries := make([]catalogEntry, 0, len(trending))
 	for _, c := range trending {
 		u := hw.EstimateUsage(c.ParamsB, "Q4_K_M", 8192, 0)
-		fits := ceil <= 0 || u.TotalGB+reserveGB <= ceil
+		fits := runCeil <= 0 || u.TotalGB <= runCeil
 		entries = append(entries, catalogEntry{
 			TrendingModel: c, EstGB: u.TotalGB, Fits: fits,
-			VRAMFit: vram <= 0 || u.TotalGB+reserveGB <= vram,
+			VRAMFit: gpuCeil <= 0 || u.TotalGB <= gpuCeil,
 		})
 	}
 
 	// Keep only runnable models when memory is known.
-	if ceil > 0 {
+	if runCeil > 0 {
 		kept := entries[:0:0]
 		for _, e := range entries {
 			if e.Fits {
@@ -88,18 +112,17 @@ type recEntry struct {
 // the CPU/GPU split), fastest-likely first (more on GPU ⇒ higher gpu_percent ⇒
 // generally faster). When memory is unknown, all are returned in file order.
 func fittingRecommended(rec store.Recommended, det hw.Detection, limit int) []recEntry {
-	totalGB := runCeilingGB(det)
-	reserveGB := float64(det.Reserve()) / gib
+	runCeil := runCeilGB(det)
 
 	entries := make([]recEntry, 0, len(rec.Models))
 	for _, r := range rec.Models {
-		fits := totalGB <= 0 || r.MemGB+reserveGB <= totalGB
-		if totalGB > 0 && !fits {
+		fits := runCeil <= 0 || r.MemGB <= runCeil
+		if runCeil > 0 && !fits {
 			continue
 		}
 		entries = append(entries, recEntry{RecModel: r, Fits: fits})
 	}
-	if totalGB > 0 {
+	if runCeil > 0 {
 		// Higher GPU share first (faster), then smaller footprint.
 		sort.SliceStable(entries, func(i, j int) bool {
 			if entries[i].GPUPercent != entries[j].GPUPercent {

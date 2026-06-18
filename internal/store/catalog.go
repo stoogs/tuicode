@@ -70,7 +70,10 @@ func (s *Store) SaveTrending(list []TrendingModel) error {
 }
 
 // LoadRecommended reads recommended.json, seeding it from the embedded default
-// on first run. This file is user-editable and never overwritten by tuicode.
+// on first run. The file is user-editable and never overwritten on disk, but new
+// curated picks from the embedded default are topped up in memory at load (by
+// tag) so existing installs gain models added in later versions — e.g. the
+// small-machine entries — without losing edits to entries they already have.
 func (s *Store) LoadRecommended() (Recommended, error) {
 	data, err := s.seedAndRead(s.recommendedPath(), defaultRecommendedJSON)
 	if err != nil {
@@ -80,7 +83,27 @@ func (s *Store) LoadRecommended() (Recommended, error) {
 	if err := json.Unmarshal(data, &rec); err != nil {
 		_ = json.Unmarshal(defaultRecommendedJSON, &rec)
 	}
-	return rec, nil
+	return topUpRecommended(rec), nil
+}
+
+// topUpRecommended appends embedded-default entries whose tag isn't already
+// present, so a previously-seeded file picks up newly-curated picks. User entries
+// win on tag collision (we never replace an existing tag).
+func topUpRecommended(rec Recommended) Recommended {
+	var def Recommended
+	if err := json.Unmarshal(defaultRecommendedJSON, &def); err != nil {
+		return rec
+	}
+	have := make(map[string]bool, len(rec.Models))
+	for _, m := range rec.Models {
+		have[m.Tag] = true
+	}
+	for _, m := range def.Models {
+		if !have[m.Tag] {
+			rec.Models = append(rec.Models, m)
+		}
+	}
+	return rec
 }
 
 // seedAndRead writes def to path if path doesn't exist yet, then reads path.

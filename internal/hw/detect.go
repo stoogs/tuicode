@@ -1,14 +1,11 @@
-// Package hw detects host memory (GPU via nvidia-smi, RAM via /proc/meminfo)
-// and estimates a safe context length for a model. All detection is best-effort
-// and degrades silently to a RAM fallback when no GPU is present.
+// Package hw detects host memory and estimates a safe context length for a
+// model. Detection is platform-specific (see detect_linux.go / detect_darwin.go)
+// and best-effort: it degrades silently to a RAM fallback when no accelerator is
+// present. All cross-platform types and the detection orchestration live here.
 package hw
 
 import (
 	"context"
-	"os"
-	"os/exec"
-	"strconv"
-	"strings"
 )
 
 // DeviceMode selects which memory source feeds the estimate.
@@ -22,7 +19,7 @@ const (
 
 // Memory is a detected memory pool, in bytes.
 type Memory struct {
-	Source string // "gpu" or "ram"
+	Source string // "gpu", "ram", or "unified" (Apple Silicon)
 	Total  int64
 	Free   int64
 }
@@ -36,10 +33,11 @@ func (m Memory) FreeGB() float64  { return float64(m.Free) / gib }
 // Detection is the full hardware picture used by the dashboard + estimator.
 type Detection struct {
 	Mode    DeviceMode
-	GPU     *Memory // nil if no GPU / cpu-only
+	GPU     *Memory // nil if no GPU / cpu-only; on Apple Silicon this is the unified pool
 	RAM     Memory
 	HasGPU  bool
 	GPUName string
+	Unified bool // GPU shares system RAM (Apple Silicon) — one pool, not two
 }
 
 // Authoritative returns the memory pool that drives estimation for the mode.
@@ -60,113 +58,40 @@ func (d Detection) Authoritative() Memory {
 	}
 }
 
-// Reserve returns the memory headroom (bytes) to leave free for the active mode.
-// 2GB for GPU, 4GB for RAM.
+// unifiedReserveFraction is the share of unified (Apple Silicon) memory kept
+// free for the OS, browser, and CPU-side work. The GPU can only address the rest
+// (~70% — Metal's default wired limit), so this fraction doubles as the practical
+// model+context ceiling and scales with the machine instead of a flat figure.
+const unifiedReserveFraction = 0.30
+
+// Reserve returns the memory headroom (bytes) to leave free for the active mode:
+// 2GB for a discrete GPU, 4GB for system RAM, and ~30% of the pool for unified
+// memory (where the same RAM runs the OS, the browser, and the model).
 func (d Detection) Reserve() int64 {
-	if d.Authoritative().Source == "gpu" {
+	mem := d.Authoritative()
+	switch mem.Source {
+	case "unified":
+		return int64(float64(mem.Total) * unifiedReserveFraction)
+	case "gpu":
 		return 2 * gib
+	default: // ram
+		return 4 * gib
 	}
-	return 4 * gib
 }
 
-// overridable for tests
-var (
-	runNvidiaSMI = func(ctx context.Context, args ...string) (string, error) {
-		out, err := exec.CommandContext(ctx, "nvidia-smi", args...).Output()
-		return string(out), err
-	}
-	meminfoPath = "/proc/meminfo"
-)
-
-// Detect gathers GPU + RAM memory for the given device mode.
+// Detect gathers GPU + RAM memory for the given device mode. detectRAM and
+// detectGPU are provided per-platform.
 func Detect(ctx context.Context, mode DeviceMode) Detection {
 	d := Detection{Mode: mode}
 	d.RAM = detectRAM()
 
 	if mode != CPUOnly {
-		if g, name, ok := detectGPU(ctx); ok {
+		if g, name, unified, ok := detectGPU(ctx); ok {
 			d.GPU = &g
 			d.HasGPU = true
 			d.GPUName = name
+			d.Unified = unified
 		}
 	}
 	return d
-}
-
-// detectGPU queries nvidia-smi for total/free VRAM (MiB). Returns ok=false on
-// any error or absence — caller falls back to RAM silently.
-func detectGPU(ctx context.Context) (Memory, string, bool) {
-	out, err := runNvidiaSMI(ctx,
-		"--query-gpu=memory.total,memory.free,name",
-		"--format=csv,noheader,nounits")
-	if err != nil {
-		return Memory{}, "", false
-	}
-	// Use the first GPU line (multi-GPU aggregation is out of scope).
-	line := firstNonEmptyLine(out)
-	if line == "" {
-		return Memory{}, "", false
-	}
-	parts := strings.Split(line, ",")
-	if len(parts) < 2 {
-		return Memory{}, "", false
-	}
-	total, err1 := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
-	free, err2 := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
-	if err1 != nil || err2 != nil {
-		return Memory{}, "", false
-	}
-	name := ""
-	if len(parts) >= 3 {
-		name = strings.TrimSpace(parts[2])
-	}
-	const mib = 1024 * 1024
-	return Memory{Source: "gpu", Total: total * mib, Free: free * mib}, name, true
-}
-
-// detectRAM reads MemTotal/MemAvailable from /proc/meminfo (values in kB).
-func detectRAM() Memory {
-	m := Memory{Source: "ram"}
-	data, err := os.ReadFile(meminfoPath)
-	if err != nil {
-		return m
-	}
-	total, avail := ParseMeminfo(string(data))
-	m.Total = total
-	m.Free = avail
-	return m
-}
-
-// ParseMeminfo extracts MemTotal and MemAvailable (bytes) from /proc/meminfo.
-// Exported for tests.
-func ParseMeminfo(content string) (total, available int64) {
-	for _, line := range strings.Split(content, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		key := strings.TrimSuffix(fields[0], ":")
-		val, err := strconv.ParseInt(fields[1], 10, 64)
-		if err != nil {
-			continue
-		}
-		val *= 1024 // kB → bytes
-		switch key {
-		case "MemTotal":
-			total = val
-		case "MemAvailable":
-			available = val
-		}
-	}
-	return total, available
-}
-
-func firstNonEmptyLine(s string) string {
-	for _, l := range strings.Split(s, "\n") {
-		l = strings.TrimSpace(l)
-		if l != "" {
-			return l
-		}
-	}
-	return ""
 }

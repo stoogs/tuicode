@@ -148,17 +148,36 @@ targets Ollama) and quitting OpenCode doesn't free VRAM.
 
 ## Prerequisites
 
-tuicode needs **OpenCode and Ollama, installed separately** — installing OpenCode
-does *not* install a model server. `nvidia-smi` is optional (better VRAM
-estimates; absent → clean RAM fallback). tuicode checks all three on every launch.
+tuicode runs on **Linux** and **macOS** (Apple Silicon and Intel). It needs
+**OpenCode and Ollama, installed separately** — installing OpenCode does *not*
+install a model server. tuicode checks both on every launch and tailors its
+install/start hints to your OS.
 
 | | OpenCode | Ollama |
 |---|---|---|
+| **macOS** | `brew install sst/tap/opencode` | `brew install ollama` + `brew services start ollama` |
 | **Arch** | `sudo pacman -S opencode` | `sudo pacman -S ollama-cuda` + `sudo systemctl enable --now ollama` |
 | **Fedora** | `curl -fsSL https://opencode.ai/install \| bash` | `curl -fsSL https://ollama.com/install.sh \| sh` |
 | **Ubuntu/Debian** | `curl -fsSL https://opencode.ai/install \| bash` | `curl -fsSL https://ollama.com/install.sh \| sh` |
 
 (On Arch, use `ollama-rocm` for AMD or `ollama` for CPU-only.)
+
+**Memory detection by platform.** On Linux, VRAM is read from `nvidia-smi`
+(optional — absent → clean RAM fallback) and RAM from `/proc/meminfo`. On Apple
+Silicon, the GPU uses **unified memory** (one pool shared with the CPU), detected
+via `sysctl`/`vm_stat` and shown as a single `Mem` bar rather than separate
+RAM/VRAM bars. Fit estimates keep **~30% of unified memory free** for the OS,
+browser, and CPU-side work — which also tracks Metal's default ~70% GPU wired
+limit. Intel Macs fall back to RAM-based estimation (Ollama runs on CPU).
+
+**No CPU/GPU split on Apple Silicon.** A CPU/GPU split is a discrete-GPU concept:
+overflow layers spill into *separate* system RAM when a model is bigger than VRAM.
+Unified memory is one pool, so moving a layer to the CPU saves no memory — Ollama
+runs the whole model on the GPU (Metal). The only ceiling is total memory and
+Metal's ~70% wired limit; past it, layers fall back to the CPU (slower, same
+memory) unless you raise `iogpu.wired_limit_mb`. So on M-series tuicode shows GPU
+placement (`place`), not a split; lowering the dashboard's `GPU` offload column
+only forces work onto the CPU (slower, with no memory saved).
 
 ## Install tuicode
 

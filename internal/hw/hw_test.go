@@ -1,54 +1,8 @@
 package hw
 
 import (
-	"context"
-	"errors"
 	"testing"
 )
-
-func TestParseMeminfo(t *testing.T) {
-	content := `MemTotal:       32000000 kB
-MemFree:         1000000 kB
-MemAvailable:   16000000 kB
-Buffers:          500000 kB`
-	total, avail := ParseMeminfo(content)
-	if total != 32000000*1024 {
-		t.Errorf("total = %d", total)
-	}
-	if avail != 16000000*1024 {
-		t.Errorf("avail = %d", avail)
-	}
-}
-
-func TestDetectGPU(t *testing.T) {
-	defer func() { runNvidiaSMI = realSMI }()
-	runNvidiaSMI = func(ctx context.Context, args ...string) (string, error) {
-		return "16384, 15000, NVIDIA GeForce RTX 4080\n", nil
-	}
-	g, name, ok := detectGPU(context.Background())
-	if !ok {
-		t.Fatal("should detect GPU")
-	}
-	if g.Total != 16384*1024*1024 {
-		t.Errorf("total = %d", g.Total)
-	}
-	if name != "NVIDIA GeForce RTX 4080" {
-		t.Errorf("name = %q", name)
-	}
-}
-
-func TestDetectGPUAbsent(t *testing.T) {
-	defer func() { runNvidiaSMI = realSMI }()
-	runNvidiaSMI = func(ctx context.Context, args ...string) (string, error) {
-		return "", errors.New("nvidia-smi: not found")
-	}
-	_, _, ok := detectGPU(context.Background())
-	if ok {
-		t.Fatal("should not detect GPU")
-	}
-}
-
-var realSMI = runNvidiaSMI
 
 func TestParseParamsBillions(t *testing.T) {
 	cases := map[string]float64{
@@ -98,6 +52,39 @@ func gpuDetection(totalGB float64) Detection {
 		GPU:    &Memory{Source: "gpu", Total: b, Free: b},
 		HasGPU: true,
 		RAM:    Memory{Source: "ram", Total: 64 * gib, Free: 60 * gib},
+	}
+}
+
+func unifiedDetection(totalGB float64) Detection {
+	b := int64(totalGB * gib)
+	return Detection{
+		Mode:    Auto,
+		GPU:     &Memory{Source: "unified", Total: b, Free: b},
+		HasGPU:  true,
+		Unified: true,
+		RAM:     Memory{Source: "ram", Total: b, Free: b},
+	}
+}
+
+func TestUnifiedReserveIsProportional(t *testing.T) {
+	// ~30% of the pool is kept free, scaling with the machine.
+	for _, totalGB := range []float64{8, 16, 64} {
+		got := float64(unifiedDetection(totalGB).Reserve()) / gib
+		want := totalGB * unifiedReserveFraction
+		if got < want-0.1 || got > want+0.1 {
+			t.Errorf("%gGB unified reserve = %.1fGB, want ~%.1fGB", totalGB, got, want)
+		}
+	}
+}
+
+func TestUnifiedCapsHeadroomVsDiscreteGPU(t *testing.T) {
+	// An ~11.7GB model (18B Q4) fits a discrete 16GB GPU (2GB reserve) but must
+	// be flagged on 16GB unified memory, where ~4.8GB stays free for the OS/apps.
+	if e := EstimateContext(gpuDetection(16), 18, "Q4_K_M", 0); !e.Fits {
+		t.Errorf("18B Q4 should fit a discrete 16GB GPU")
+	}
+	if e := EstimateContext(unifiedDetection(16), 18, "Q4_K_M", 0); e.Fits {
+		t.Errorf("18B Q4 should not fit comfortably in 16GB unified memory")
 	}
 }
 

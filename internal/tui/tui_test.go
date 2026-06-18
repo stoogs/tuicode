@@ -544,6 +544,36 @@ func TestFittingModels(t *testing.T) {
 	}
 }
 
+func TestFittingModelsUnified(t *testing.T) {
+	// 8GB Apple Silicon: one pool. Models up to the run ceiling (total − ~1.5GB
+	// OS floor) appear; only those under the ~70% Metal ceiling run fully on GPU.
+	det := hw.Detection{
+		Mode: hw.Auto, Unified: true,
+		GPU: &hw.Memory{Source: "unified", Total: 8 * gib, Free: 8 * gib}, HasGPU: true,
+		RAM: hw.Memory{Source: "ram", Total: 8 * gib, Free: 8 * gib},
+	}
+	trending := []store.TrendingModel{
+		{Tag: "qwen3:4b", ParamsB: 4},   // ~3.3GB → fully on GPU
+		{Tag: "qwen3:8b", ParamsB: 8},   // ~6.1GB → runs, but past the on-GPU ceiling
+		{Tag: "qwen3:14b", ParamsB: 14}, // ~10GB → exceeds 8GB unified, excluded
+	}
+	byTag := map[string]catalogEntry{}
+	for _, e := range fittingModels(trending, det, trendingLimit) {
+		byTag[e.Tag] = e
+	}
+	if _, ok := byTag["qwen3:14b"]; ok {
+		t.Error("14B should not fit 8GB unified memory")
+	}
+	if e, ok := byTag["qwen3:4b"]; !ok || !e.VRAMFit {
+		t.Errorf("4B should fit and run fully on GPU (ok=%v vramfit=%v)", ok, e.VRAMFit)
+	}
+	if e, ok := byTag["qwen3:8b"]; !ok {
+		t.Error("8B should be shown (runs via CPU split on unified)")
+	} else if e.VRAMFit {
+		t.Error("8B (~6.1GB) exceeds the ~5.6GB on-GPU ceiling — should not be VRAMFit")
+	}
+}
+
 // drain executes a tea.Cmd, recursing into batched children. Each command runs
 // with a short timeout so the status-clear timer (a long sleep) is abandoned
 // rather than blocking the test.

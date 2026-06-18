@@ -6,6 +6,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"time"
@@ -33,6 +34,7 @@ func main() {
 		flagDryRun    = flag.Bool("dry-run", false, "show writes/loads without performing them")
 		flagVerbose   = flag.Bool("verbose", false, "log detection/API/CLI calls to stderr")
 		flagEndpoint  = flag.String("endpoint", server.DefaultEndpoint, "Ollama endpoint")
+		flagPrintDet  = flag.Bool("print-detection", false, "print detected hardware/deps and exit")
 	)
 	flag.Parse()
 
@@ -82,6 +84,15 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	report := deps.Check(ctx, be)
 	cancel()
+
+	// --- print detection and exit (debugging / validating the OS code path) ---
+	if *flagPrintDet {
+		dctx, dcancel := context.WithTimeout(context.Background(), 8*time.Second)
+		det := hw.Detect(dctx, mode)
+		dcancel()
+		printDetection(os.Stdout, mode, det, report)
+		return
+	}
 
 	// --- resolve opencode.json + working dir ---
 	cwd, _ := os.Getwd()
@@ -143,4 +154,59 @@ func main() {
 func fatal(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "tuicode: "+format+"\n", a...)
 	os.Exit(1)
+}
+
+// printDetection writes a human-readable summary of detected hardware and
+// dependencies, then returns. Used by --print-detection to validate the per-OS
+// code path (e.g. unified vs RAM-only) without launching the TUI.
+func printDetection(w io.Writer, mode hw.DeviceMode, det hw.Detection, report deps.Report) {
+	const gib = 1024 * 1024 * 1024
+	mem := det.Authoritative()
+	kind := mem.Source
+	if det.Unified {
+		kind = "unified (Apple Silicon — one pool, no CPU/GPU split)"
+	}
+
+	fmt.Fprintf(w, "tuicode %s — detection\n", version)
+	fmt.Fprintf(w, "  OS:         %s (%s)\n", report.Distro.Label(), report.Distro.Family)
+	fmt.Fprintf(w, "  Device:     %s\n", mode)
+	fmt.Fprintf(w, "  Memory:     %s\n", kind)
+	fmt.Fprintf(w, "    total     %.1f GB\n", mem.TotalGB())
+	fmt.Fprintf(w, "    free      %.1f GB\n", mem.FreeGB())
+	fmt.Fprintf(w, "    reserve   %.1f GB (headroom)\n", float64(det.Reserve())/gib)
+	if det.GPU != nil {
+		tag := "discrete VRAM"
+		if det.Unified {
+			tag = "unified"
+		}
+		fmt.Fprintf(w, "  GPU:        %s (%s)\n", det.GPUName, tag)
+	} else {
+		fmt.Fprintf(w, "  GPU:        none — RAM is authoritative\n")
+	}
+	fmt.Fprintf(w, "  OpenCode:   %s\n", toolLine(report.OpenCode))
+	fmt.Fprintf(w, "  Ollama:     %s  · daemon %s\n", toolLine(report.Ollama), daemonState(report))
+	if report.NvidiaSMI.Found {
+		fmt.Fprintf(w, "  nvidia-smi: %s\n", report.NvidiaSMI.Path)
+	}
+}
+
+func toolLine(t deps.Tool) string {
+	if !t.Found {
+		return "not found"
+	}
+	if t.Version != "" {
+		return fmt.Sprintf("%s (%s)", t.Path, t.Version)
+	}
+	return t.Path
+}
+
+func daemonState(r deps.Report) string {
+	switch {
+	case !r.Ollama.Found:
+		return "n/a"
+	case r.Daemon.Reachable:
+		return "up"
+	default:
+		return "down"
+	}
 }

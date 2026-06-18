@@ -274,7 +274,7 @@ func (m Model) viewOnboarding() string {
 
 	if !m.daemon.Reachable {
 		b.WriteString(badStyle.Render("Ollama daemon not reachable — start it first: ") +
-			accentStyle.Render("sudo systemctl start ollama"))
+			accentStyle.Render(m.opts.Deps.Distro.DaemonStartCmd()))
 		b.WriteString("\n\n")
 	}
 	if m.onboard.tab == tabManual {
@@ -329,13 +329,22 @@ func (m Model) renderManualAdd() string {
 }
 
 func (m Model) memNote() string {
-	ram := runCeilingGB(m.detection)
+	det := m.detection
+	if det.Unified && det.GPU != nil {
+		// One shared pool: a single figure, plus the ~70% that stays on the GPU.
+		return fmt.Sprintf("run in %.0fGB unified memory · ~%.0fGB on-GPU",
+			det.GPU.TotalGB(), gpuCeilGB(det))
+	}
+	ram := float64(det.RAM.Total) / gib
+	if ram <= 0 {
+		ram = det.Authoritative().TotalGB()
+	}
 	if ram <= 0 {
 		return "memory unknown"
 	}
 	s := fmt.Sprintf("run in %.0fGB RAM", ram)
-	if v := vramGB(m.detection); v > 0 {
-		s += fmt.Sprintf(" · %.0fGB VRAM", v)
+	if det.GPU != nil {
+		s += fmt.Sprintf(" · %.0fGB VRAM", det.GPU.TotalGB())
 	}
 	return s
 }
@@ -352,7 +361,13 @@ func (m Model) renderTrendingList() string {
 	for i, e := range list {
 		note := e.Note
 		if !e.VRAMFit {
-			note = strings.TrimSpace(note + " · CPU split (spills past VRAM)")
+			spill := "CPU split (spills past VRAM)"
+			if m.detection.Unified {
+				// Unified memory: no VRAM overflow — it exceeds Metal's ~70% wired
+				// limit, so it runs slower (or needs iogpu.wired_limit_mb raised).
+				spill = "past GPU wired limit (slower)"
+			}
+			note = strings.TrimSpace(note + " · " + spill)
 		}
 		line := fmt.Sprintf("%-22s %6.1fGB  %s", e.Tag, e.EstGB, note)
 		b.WriteString(rowCursor(i == m.onboard.cursor, line))

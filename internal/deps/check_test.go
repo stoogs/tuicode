@@ -59,6 +59,23 @@ func TestDetectAllPresent(t *testing.T) {
 	}
 }
 
+func TestCleanVersionSkipsWarnings(t *testing.T) {
+	cases := map[string]string{
+		"opencode 1.17.3":         "1.17.3",
+		"ollama version is 0.5.4": "0.5.4",
+		"v2.0.1":                  "2.0.1",
+		// Bun-based OpenCode on a non-AVX/Rosetta Mac: warning + URL, then version.
+		"warn: CPU lacks AVX support, strange crashes may occur.\n  https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-darwin-x64-baseline.zip\n1.17.7": "1.17.7",
+		// No version-like token → first non-empty line.
+		"some banner": "some banner",
+	}
+	for in, want := range cases {
+		if got := cleanVersion(in); got != want {
+			t.Errorf("cleanVersion(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func restore() {
 	lookPath = func(name string) (string, error) { return "", errors.New("stub") }
 	runVersion = func(ctx context.Context, bin string, args ...string) string { return "" }

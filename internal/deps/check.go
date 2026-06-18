@@ -89,25 +89,42 @@ func detectTool(ctx context.Context, name string, required bool, versionArgs []s
 	return t
 }
 
-// cleanVersion extracts a version-ish token from noisy --version output.
+// cleanVersion extracts a version-ish token from noisy --version output. It
+// scans every line, not just the first, because some tools print warnings ahead
+// of the version (e.g. Bun-based OpenCode emits an AVX/Rosetta notice first).
 func cleanVersion(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return ""
 	}
-	// Take the first line; strip a leading program name if present.
-	line := s
-	if i := strings.IndexByte(line, '\n'); i >= 0 {
-		line = line[:i]
-	}
-	fields := strings.Fields(line)
-	// Prefer a field that looks like a version (contains a digit and a dot).
-	for _, f := range fields {
-		if strings.ContainsAny(f, "0123456789") && strings.Contains(f, ".") {
-			return strings.TrimPrefix(f, "v")
+	for _, line := range strings.Split(s, "\n") {
+		for _, f := range strings.Fields(line) {
+			v := strings.TrimRight(strings.TrimPrefix(f, "v"), ".,;:)]")
+			if looksLikeVersion(v) {
+				return v
+			}
 		}
 	}
-	return line
+	// No version token found; fall back to the first non-empty line.
+	for _, line := range strings.Split(s, "\n") {
+		if l := strings.TrimSpace(line); l != "" {
+			return l
+		}
+	}
+	return s
+}
+
+// looksLikeVersion reports whether f is a standalone version number (e.g.
+// "1.17.7", "0.30.8") — starts with a digit, contains a dot, and isn't embedded
+// in a URL or path (which would carry a stray version like a download link's).
+func looksLikeVersion(f string) bool {
+	if f == "" || f[0] < '0' || f[0] > '9' {
+		return false
+	}
+	if !strings.Contains(f, ".") || strings.ContainsAny(f, "/:") {
+		return false
+	}
+	return true
 }
 
 // ParseOSRelease parses /etc/os-release content into a Distro. Exported for tests.

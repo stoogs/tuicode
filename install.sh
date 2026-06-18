@@ -23,6 +23,7 @@ cd "$here"
 
 if ! command -v go >/dev/null 2>&1; then
   echo "error: Go toolchain not found. Install Go 1.23+ first:" >&2
+  echo "  macOS:  brew install go" >&2
   echo "  Arch:   sudo pacman -S go" >&2
   echo "  Fedora: sudo dnf install golang" >&2
   echo "  Ubuntu: sudo apt install golang" >&2
