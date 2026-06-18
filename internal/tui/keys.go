@@ -237,11 +237,8 @@ func (m Model) doLoad(base string) (tea.Model, tea.Cmd) {
 	}
 	cmds = append(cmds, m.setStatus(note))
 	cmds = append(cmds, m.loadServeCmd(base, serve, derivedParams(cfg, mode), keepAlive))
-
-	if !m.spinning {
-		m.spinning = true
-		cmds = append(cmds, spinnerCmd())
-	}
+	// No animation timer: the load view is static, and the 2s poll keeps state
+	// (and the actionResult on completion) live.
 	return m, tea.Batch(cmds...)
 }
 

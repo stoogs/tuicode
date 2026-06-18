@@ -90,10 +90,6 @@ type Model struct {
 	confirm       string // pending delete confirmation (base tag), "" = none
 	loadedPrompt  string // just-loaded base tag awaiting "open in OpenCode?" prompt
 
-	// loading-spinner animation
-	spinFrame int
-	spinning  bool
-
 	quitting bool // graceful shutdown in progress (unload + prune)
 
 	// configure screen state
@@ -132,7 +128,6 @@ type trendingRefreshedMsg struct {
 	fetchedAt int64
 }
 type clearStatusMsg struct{ token int }
-type spinnerTickMsg struct{}
 type pruneResultMsg struct {
 	count int
 	err   error
@@ -384,11 +379,6 @@ func scheduleTick() tea.Cmd {
 	return tea.Tick(pollInterval, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
-// spinnerCmd drives the load animation (faster than the poll tick).
-func spinnerCmd() tea.Cmd {
-	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return spinnerTickMsg{} })
-}
-
 // hasPendingLoad reports whether any model is currently loading.
 func (m Model) hasPendingLoad() bool {
 	for _, v := range m.pending {
@@ -509,14 +499,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.token == statusToken {
 			m.status = ""
 		}
-		return m, nil
-
-	case spinnerTickMsg:
-		m.spinFrame++
-		if m.hasPendingLoad() {
-			return m, spinnerCmd()
-		}
-		m.spinning = false
 		return m, nil
 
 	case pruneResultMsg:

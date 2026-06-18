@@ -156,3 +156,11 @@ func TestNoProjectedTextWhileSettling(t *testing.T) {
 		}
 	}
 }
+
+func TestHyperlinkOSC8(t *testing.T) {
+	got := hyperlink("https://ollama.com/library", "lib")
+	want := "\x1b]8;;https://ollama.com/library\x1b\\lib\x1b]8;;\x1b\\"
+	if got != want {
+		t.Errorf("hyperlink = %q, want %q", got, want)
+	}
+}

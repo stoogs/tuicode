@@ -23,6 +23,13 @@ func padBetween(left, right string, w int) string {
 // ANSI width math fighting the terminal; structure comes from headers/dividers.
 func boxWrap(s string, m Model) string { return s }
 
+// hyperlink wraps label in an OSC 8 terminal hyperlink to url. Terminals that
+// support OSC 8 (kitty, WezTerm, foot, iTerm2, modern gnome-terminal, …) make it
+// clickable; others ignore the escape and just show the label.
+func hyperlink(url, label string) string {
+	return "\x1b]8;;" + url + "\x1b\\" + label + "\x1b]8;;\x1b\\"
+}
+
 const gib = 1024 * 1024 * 1024
 
 // fmtGB formats bytes as a GB string, e.g. "9.9GB".

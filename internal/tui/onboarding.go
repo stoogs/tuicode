@@ -320,7 +320,8 @@ func (m Model) renderManualAdd() string {
 	}
 	b.WriteString("  " + accentStyle.Render("ollama pull ") + selectedStyle.Render(" "+shown+" ") + "\n")
 	if m.onboard.manual == "" {
-		b.WriteString("  " + mutedStyle.Render("e.g. qwen3.6:35b-a3b — find tags at ") + accentStyle.Render("ollama.com/library") + "\n")
+		b.WriteString("  " + mutedStyle.Render("e.g. qwen3.6:35b-a3b — find tags at ") +
+			hyperlink("https://ollama.com/library", accentStyle.Render("ollama.com/library")) + "\n")
 	} else {
 		b.WriteString("  " + mutedStyle.Render("press ") + keyStyle.Render("[⏎]") + mutedStyle.Render(" to pull") + "\n")
 	}
