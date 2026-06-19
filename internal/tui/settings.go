@@ -67,11 +67,16 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // settingEnabled reports whether a setting row is interactive. The compaction
 // sub-settings are disabled (skipped, greyed) while "Manage compaction" is off,
-// since they wouldn't be written.
+// since they wouldn't be written. Reserve is further disabled when auto-compact
+// is off, because reserve only tunes *where auto-compaction fires* — it does
+// nothing on its own.
 func (m Model) settingEnabled(idx int) bool {
+	c := m.opts.AppConfig.Compaction
 	switch idx {
-	case setCompactAuto, setCompactPrune, setReservePct:
-		return m.opts.AppConfig.Compaction.Manage
+	case setCompactAuto, setCompactPrune:
+		return c.Manage
+	case setReservePct:
+		return c.Manage && c.Auto
 	}
 	return true
 }
@@ -153,6 +158,10 @@ func (m Model) viewSettings() string {
 	b.WriteString("\n\n")
 
 	c := m.opts.AppConfig.Compaction
+	reserveVal := reserveLabel(c.ReservePct)
+	if c.Manage && !c.Auto {
+		reserveVal += "  (auto off)" // reserve only tunes auto-compaction
+	}
 	rows := []struct {
 		idx   int
 		label string
@@ -164,7 +173,7 @@ func (m Model) viewSettings() string {
 		{setManageCompaction, "Manage compaction", manageLabel(m.opts.AppConfig.Compaction.Manage), true},
 		{setCompactAuto, "    Auto-compact", onOff(c.Auto), true},
 		{setCompactPrune, "    Prune tool outputs", onOff(c.Prune), true},
-		{setReservePct, "    Compact reserve", reserveLabel(c.ReservePct), true},
+		{setReservePct, "    Compact reserve", reserveVal, true},
 		{setOpencodeJSON, "opencode.json", m.opts.OpencodeJSON, false},
 		{setOllamaModels, "Models folder", ollamaModelsDir() + "   (⏎ open in file manager)", false},
 		{setFlashAttn, "Flash attention", envStatus("OLLAMA_FLASH_ATTENTION"), false},
@@ -192,6 +201,11 @@ func (m Model) viewSettings() string {
 			val = mutedStyle.Render(val)
 		}
 		b.WriteString(cursor + label + val + "\n")
+	}
+	if c.Manage && !c.Auto {
+		b.WriteString("\n")
+		b.WriteString(warnStyle.Render("! Auto-compact off: long sessions hit the hard window limit, no summarising."))
+		b.WriteString("\n")
 	}
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render(m.settingHelp()))
@@ -310,7 +324,7 @@ func (m Model) settingHelp() string {
 	case setCompactPrune:
 		return "Drops earlier tool results (file reads, command output) to reclaim tokens."
 	case setReservePct:
-		return "Tokens of headroom kept free; scales with context. Applies on next launch."
+		return "Where auto-compact fires: headroom kept free (bigger = earlier). Needs auto on."
 	case setFlashAttn, setKVCache:
 		return "Daemon env var (read-only here) — set it on Ollama and restart, see below."
 	default:

@@ -41,8 +41,24 @@ func TestSettingsViewFitsAndGroups(t *testing.T) {
 	}
 	// With management on, the next row IS the first sub-row.
 	m.opts.AppConfig.Compaction.Manage = true
+	m.opts.AppConfig.Compaction.Auto = true
 	if next := m.stepSetting(+1); next != setCompactAuto {
 		t.Errorf("with management on, next row should be Auto-compact, got %d", next)
+	}
+
+	// Reserve only tunes auto-compaction: disabled (and skipped + warned) when
+	// auto-compact is off.
+	m.opts.AppConfig.Compaction.Auto = false
+	if m.settingEnabled(setReservePct) {
+		t.Error("reserve should be disabled when auto-compact is off")
+	}
+	m.settingsCursor = setCompactPrune
+	if next := m.stepSetting(+1); next == setReservePct {
+		t.Error("cursor should skip reserve when auto-compact is off")
+	}
+	m.settingsCursor = setManageCompaction
+	if out := m.viewSettings(); !strings.Contains(out, "Auto-compact off") {
+		t.Error("expected a warning when auto-compact is off")
 	}
 }
 
