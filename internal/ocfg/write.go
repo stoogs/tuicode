@@ -20,6 +20,8 @@ type Writer struct {
 	// DefaultModel, when set, also writes the top-level "model" field as
 	// "ollama/<tag>" so OpenCode opens with this model selected.
 	DefaultModel string
+	// Compaction, when non-nil, sets the top-level "compaction" block.
+	Compaction map[string]any
 	// Now returns the current time (overridable in tests).
 	Now func() time.Time
 	// Log receives action lines (for --verbose / --dry-run).
@@ -68,6 +70,7 @@ func (w *Writer) Write(path string, models []ModelEntry) (WriteResult, error) {
 		// Make OpenCode default to this model on open.
 		doc["model"] = providerID + "/" + w.DefaultModel
 	}
+	SetCompaction(doc, w.Compaction)
 	out, err := Marshal(doc)
 	if err != nil {
 		return res, err

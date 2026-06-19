@@ -613,7 +613,7 @@ func (m *Model) reconcilePending() {
 // tag, the base tag, or any other tuicode-derived variant of it. Returns the
 // loaded model, the actual loaded tag, and whether one was found.
 func (m Model) loadedFor(base string) (server.LoadedModel, string, bool) {
-	cfg := m.ensureConfig(base)
+	cfg := m.servedConfig(base)
 	serve := serveTag(base, cfg, m.opts.DeviceMode)
 	if lm, ok := m.loadedByTag(serve); ok {
 		return lm, serve, true
@@ -640,7 +640,7 @@ func (m Model) loadedFor(base string) (server.LoadedModel, string, bool) {
 //     resident load against the desired one; a mismatch (or an unrecorded load,
 //     e.g. resident from a previous run) means a reload is needed.
 func (m Model) loadedCurrent(base string) bool {
-	cfg := m.ensureConfig(base)
+	cfg := m.servedConfig(base)
 	mode := m.opts.DeviceMode
 	_, actual, loaded := m.loadedFor(base)
 	if !loaded {
@@ -650,6 +650,60 @@ func (m Model) loadedCurrent(base string) bool {
 		return actual == base
 	}
 	return m.applied[base] == configKey(cfg, mode)
+}
+
+// effectiveContext resolves a model's context window, following the global
+// default when the per-model value is 0 ("use the global default"). The stored
+// per-model value stays 0 so changing the global default keeps applying until
+// the user pins an explicit context.
+func (m Model) effectiveContext(cfg store.ModelConfig) int {
+	if cfg.ContextLength > 0 {
+		return cfg.ContextLength
+	}
+	return m.opts.AppConfig.DefaultContext
+}
+
+// servedConfig is the model config with its effective context resolved — used
+// everywhere the model is loaded, launched, or displayed, so the baked num_ctx,
+// the serve tag, and the CTX column all agree.
+func (m Model) servedConfig(tag string) store.ModelConfig {
+	cfg := m.ensureConfig(tag)
+	cfg.ContextLength = m.effectiveContext(cfg)
+	return cfg
+}
+
+// compactionBlock builds the top-level opencode.json "compaction" block from the
+// global preferences. reserved is derived from the served context window so it
+// scales with whatever context the model runs at (e.g. 25% → compact at ~75%).
+// With an unknown window (auto context) reserved is omitted, so OpenCode uses
+// its own default headroom.
+func (m Model) compactionBlock(ctx int) map[string]any {
+	c := m.opts.AppConfig.Compaction
+	if !c.Manage {
+		return nil // leave opencode.json's compaction untouched
+	}
+	block := map[string]any{"auto": c.Auto, "prune": c.Prune}
+	if ctx > 0 && c.ReservePct > 0 {
+		block["reserved"] = ctx * c.ReservePct / 100
+	}
+	return block
+}
+
+// outputBudget picks a max-output token limit for OpenCode's per-model `limit`
+// (required alongside context): a quarter of the window, clamped to a sane range
+// and never exceeding the window itself.
+func outputBudget(ctx int) int {
+	out := ctx / 4
+	if out < 4096 {
+		out = 4096
+	}
+	if out > 32768 {
+		out = 32768
+	}
+	if out > ctx {
+		out = ctx
+	}
+	return out
 }
 
 // ensureConfig returns the cached per-model config, loading it on first access.
@@ -791,7 +845,7 @@ func (m Model) continueGlobal() (tea.Model, tea.Cmd) {
 // then suspends the TUI and runs OpenCode as a foreground child. A non-empty
 // sessionID resumes that session via `-s`.
 func (m Model) execOpenCodeSession(base, sessionID string) (tea.Model, tea.Cmd) {
-	cfg := m.ensureConfig(base)
+	cfg := m.servedConfig(base)
 	serve := serveTag(base, cfg, m.opts.DeviceMode)
 
 	name := cfg.DisplayName
@@ -803,9 +857,16 @@ func (m Model) execOpenCodeSession(base, sessionID string) (tea.Model, tea.Cmd) 
 		Keep:         10,
 		DryRun:       m.opts.DryRun,
 		DefaultModel: serve, // OpenCode opens with this model selected
+		Compaction:   m.compactionBlock(cfg.ContextLength),
 		Log:          m.opts.Logf,
 	}
 	entry := ocfg.ModelEntry{Tag: serve, DisplayName: name}
+	// Tell OpenCode the real window (we bake num_ctx into the derived model) so
+	// auto-compaction triggers correctly and the context display is accurate.
+	if cfg.ContextLength > 0 {
+		entry.Context = cfg.ContextLength
+		entry.Output = outputBudget(cfg.ContextLength)
+	}
 	if _, err := w.Write(m.opts.OpencodeJSON, []ocfg.ModelEntry{entry}); err != nil {
 		m.setError(fmt.Sprintf("opencode.json write failed: %v", err))
 		return m, nil

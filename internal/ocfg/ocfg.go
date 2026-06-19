@@ -26,6 +26,12 @@ type Doc map[string]any
 type ModelEntry struct {
 	Tag         string // map key, e.g. "qwen3-coder:30b"
 	DisplayName string // value {"name": ...}
+	// Context/Output, when > 0, write a "limit" so OpenCode knows the real
+	// window (we bake num_ctx into a derived model, which OpenCode can't infer)
+	// — making auto-compaction trigger at the right point and the context
+	// display accurate. Both are required together by OpenCode's schema.
+	Context int
+	Output  int
 }
 
 // Read parses opencode.json at path. A missing file yields a minimal valid Doc.
@@ -100,6 +106,26 @@ func MergeOllama(doc Doc, models []ModelEntry) Doc {
 			name = m.Tag
 		}
 		entry["name"] = name
+		if m.Context > 0 {
+			limit := asMap(entry, "limit")
+			limit["context"] = m.Context
+			limit["output"] = m.Output
+		}
+	}
+	return doc
+}
+
+// SetCompaction deep-merges the given keys into the top-level "compaction"
+// block, preserving any other keys already there (only the keys tuicode manages
+// are overwritten). A nil block leaves the doc untouched entirely. Returns the
+// same doc for chaining.
+func SetCompaction(doc Doc, block map[string]any) Doc {
+	if block == nil {
+		return doc
+	}
+	comp := asMap(doc, "compaction")
+	for k, v := range block {
+		comp[k] = v
 	}
 	return doc
 }
