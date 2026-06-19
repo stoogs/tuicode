@@ -115,11 +115,17 @@ func MergeOllama(doc Doc, models []ModelEntry) Doc {
 	return doc
 }
 
-// SetCompaction sets (or replaces) the top-level "compaction" block. A nil block
-// leaves the doc untouched. Returns the same doc for chaining.
+// SetCompaction deep-merges the given keys into the top-level "compaction"
+// block, preserving any other keys already there (only the keys tuicode manages
+// are overwritten). A nil block leaves the doc untouched entirely. Returns the
+// same doc for chaining.
 func SetCompaction(doc Doc, block map[string]any) Doc {
-	if block != nil {
-		doc["compaction"] = block
+	if block == nil {
+		return doc
+	}
+	comp := asMap(doc, "compaction")
+	for k, v := range block {
+		comp[k] = v
 	}
 	return doc
 }

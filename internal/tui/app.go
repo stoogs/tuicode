@@ -679,6 +679,9 @@ func (m Model) servedConfig(tag string) store.ModelConfig {
 // its own default headroom.
 func (m Model) compactionBlock(ctx int) map[string]any {
 	c := m.opts.AppConfig.Compaction
+	if !c.Manage {
+		return nil // leave opencode.json's compaction untouched
+	}
 	block := map[string]any{"auto": c.Auto, "prune": c.Prune}
 	if ctx > 0 && c.ReservePct > 0 {
 		block["reserved"] = ctx * c.ReservePct / 100

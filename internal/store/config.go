@@ -74,6 +74,11 @@ type AppConfig struct {
 // window: OpenCode summarizes (and optionally prunes) older messages as the
 // window fills, leaving `reserved` tokens of headroom.
 type Compaction struct {
+	// Manage gates whether tuicode writes the compaction block at all. When
+	// false, tuicode leaves opencode.json's compaction untouched so you can
+	// hand-maintain it. When true, the fields below are deep-merged in (your
+	// other compaction keys are preserved).
+	Manage     bool `json:"manage"`
 	Auto       bool `json:"auto"`        // auto-summarize when the window fills
 	Prune      bool `json:"prune"`       // drop old tool outputs to save tokens
 	ReservePct int  `json:"reserve_pct"` // headroom reserved as a % of the context window (→ compaction triggers earlier)
@@ -84,7 +89,7 @@ func DefaultAppConfig() AppConfig {
 	return AppConfig{
 		DeviceMode:       "auto",
 		DefaultResidency: DefaultResidency(),
-		Compaction:       Compaction{Auto: true, Prune: true, ReservePct: 25},
+		Compaction:       Compaction{Manage: true, Auto: true, Prune: true, ReservePct: 25},
 	}
 }
 

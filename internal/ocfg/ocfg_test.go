@@ -123,6 +123,30 @@ func TestMergeWritesModelLimit(t *testing.T) {
 	}
 }
 
+func TestSetCompactionMergesPreservingUserKeys(t *testing.T) {
+	doc := Doc{
+		"$schema": schemaURL,
+		"compaction": map[string]any{
+			"auto":      false,  // user's value — tuicode overrides
+			"customKey": "keep", // user's extra key — must survive
+		},
+	}
+	SetCompaction(doc, map[string]any{"auto": true, "prune": true, "reserved": 8192})
+	comp := doc["compaction"].(map[string]any)
+	if comp["customKey"] != "keep" {
+		t.Errorf("user key dropped: %v", comp)
+	}
+	if comp["auto"] != true || comp["prune"] != true || comp["reserved"] != 8192 {
+		t.Errorf("managed keys not applied: %v", comp)
+	}
+
+	// A nil block must leave the existing compaction untouched.
+	SetCompaction(doc, nil)
+	if _, ok := doc["compaction"]; !ok {
+		t.Error("nil block should not drop compaction")
+	}
+}
+
 func TestWriteCompactionBlockIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "opencode.json")

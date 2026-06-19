@@ -14,6 +14,7 @@ import (
 const (
 	setDevice = iota
 	setDefaultContext
+	setManageCompaction
 	setCompactAuto
 	setCompactPrune
 	setReservePct
@@ -83,6 +84,9 @@ func (m Model) adjustSetting(dir int) (tea.Model, tea.Cmd) {
 		i := indexInt(contextChoices, m.opts.AppConfig.DefaultContext)
 		m.opts.AppConfig.DefaultContext = contextChoices[clamp(i+dir, 0, len(contextChoices)-1)]
 		m.persistAppConfig()
+	case setManageCompaction:
+		m.opts.AppConfig.Compaction.Manage = !m.opts.AppConfig.Compaction.Manage
+		m.persistAppConfig()
 	case setCompactAuto:
 		m.opts.AppConfig.Compaction.Auto = !m.opts.AppConfig.Compaction.Auto
 		m.persistAppConfig()
@@ -125,6 +129,7 @@ func (m Model) viewSettings() string {
 	b.WriteString(divider(w))
 	b.WriteString("\n\n")
 
+	c := m.opts.AppConfig.Compaction
 	rows := []struct {
 		idx   int
 		label string
@@ -133,9 +138,10 @@ func (m Model) viewSettings() string {
 	}{
 		{setDevice, "Device mode", string(m.opts.DeviceMode), true},
 		{setDefaultContext, "Default context", ctxDefaultLabel(m.opts.AppConfig.DefaultContext), true},
-		{setCompactAuto, "Auto-compact", onOff(m.opts.AppConfig.Compaction.Auto), true},
-		{setCompactPrune, "Prune tool outputs", onOff(m.opts.AppConfig.Compaction.Prune), true},
-		{setReservePct, "Compact reserve", reserveLabel(m.opts.AppConfig.Compaction.ReservePct), true},
+		{setManageCompaction, "Manage compaction", manageLabel(m.opts.AppConfig.Compaction.Manage), true},
+		{setCompactAuto, "Auto-compact", compactSub(onOff(c.Auto), c.Manage), true},
+		{setCompactPrune, "Prune tool outputs", compactSub(onOff(c.Prune), c.Manage), true},
+		{setReservePct, "Compact reserve", compactSub(reserveLabel(c.ReservePct), c.Manage), true},
 		{setOpencodeJSON, "opencode.json", m.opts.OpencodeJSON, false},
 		{setOllamaModels, "Models folder", ollamaModelsDir() + "   (⏎ open in file manager)", false},
 		{setFlashAttn, "Flash attention", envStatus("OLLAMA_FLASH_ATTENTION"), false},
@@ -162,9 +168,11 @@ func (m Model) viewSettings() string {
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render("Default context seeds new models (each keeps its own once you change its CTX)."))
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("Auto-compact/prune/reserve are written to opencode.json so long sessions stay"))
+	b.WriteString(mutedStyle.Render("Auto-compact/prune/reserve are deep-merged into opencode.json (your other"))
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("inside the window — reserve scales with the context the model runs at."))
+	b.WriteString(mutedStyle.Render("compaction keys are preserved) — reserve scales with the model's context."))
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render("Turn off 'Manage compaction' to hand-maintain that block yourself."))
 	b.WriteString("\n\n")
 	d := m.opts.Deps.Distro
 	b.WriteString(mutedStyle.Render("OLLAMA_MODELS / flash-attn / KV-cache are read by the Ollama daemon at startup —"))
@@ -260,6 +268,22 @@ func onOff(b bool) string {
 		return "on"
 	}
 	return "off"
+}
+
+// manageLabel describes the compaction master switch.
+func manageLabel(manage bool) string {
+	if manage {
+		return "on   (tuicode writes it; your other keys preserved)"
+	}
+	return "off  (left untouched — hand-maintain in opencode.json)"
+}
+
+// compactSub annotates a sub-setting that only applies when compaction is managed.
+func compactSub(val string, manage bool) string {
+	if !manage {
+		return val + "   (not written)"
+	}
+	return val
 }
 
 // ctxDefaultLabel renders the global default-context value (0 = each model uses

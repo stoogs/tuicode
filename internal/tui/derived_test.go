@@ -114,6 +114,36 @@ func TestLaunchWritesLimitAndCompaction(t *testing.T) {
 	}
 }
 
+func TestLaunchManageCompactionOffPreservesUserBlock(t *testing.T) {
+	base := "a:1b"
+	be := &fakeBackend{reachable: true, disk: []server.DiskModel{{Tag: base, Size: gib}}}
+	opts := testOpts(t, be, true)
+	// User hand-maintains their own compaction block.
+	userJSON := `{"$schema":"https://opencode.ai/config.json","compaction":{"auto":false,"reserved":12345}}`
+	if err := os.WriteFile(opts.OpencodeJSON, []byte(userJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := New(opts)
+	m.disk = be.disk
+	m.opts.AppConfig.Compaction.Manage = false // don't touch compaction
+
+	m.execOpenCodeSession(base, "")
+
+	data, err := os.ReadFile(opts.OpencodeJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	json.Unmarshal(data, &doc)
+	comp, ok := doc["compaction"].(map[string]any)
+	if !ok {
+		t.Fatalf("compaction block lost: %v", doc)
+	}
+	if comp["auto"] != false || comp["reserved"].(float64) != 12345 {
+		t.Errorf("user compaction was modified: %v", comp)
+	}
+}
+
 func TestLoadCreatesDerivedForContext(t *testing.T) {
 	be := &fakeBackend{reachable: true,
 		disk: []server.DiskModel{{Tag: "deepseek-r1:14b", Size: 9 * gib, ParamSize: "14B", Quant: "Q4_K_M"}},
