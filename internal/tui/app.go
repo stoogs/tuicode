@@ -81,6 +81,7 @@ type Model struct {
 	configs map[string]store.ModelConfig   // per-tag config cache (edited inline)
 	pending map[string]string              // base tag → "load"|"unload"|"delete" in flight
 	details map[string]server.ModelDetails // per-tag `ollama show` cache (model max ctx)
+	applied map[string]string              // base tag → configKey of the resident derived load (for reload detection)
 
 	cursorInit bool // dashCursor positioned on the favourite once on startup
 
@@ -111,9 +112,10 @@ type listResultMsg struct {
 	err  error
 }
 type actionResultMsg struct {
-	action string
-	tag    string
-	err    error
+	action     string
+	tag        string
+	appliedKey string // for a successful "load": the configKey now resident (reload detection)
+	err        error
 }
 type sessionDoneMsg struct {
 	err  error
@@ -146,6 +148,7 @@ func New(opts Options) Model {
 		configs: map[string]store.ModelConfig{},
 		pending: map[string]string{},
 		details: map[string]server.ModelDetails{},
+		applied: map[string]string{},
 	}
 	switch {
 	case !opts.Deps.OK():
@@ -249,19 +252,22 @@ func (m Model) listCmd() tea.Cmd {
 
 // loadServeCmd creates the derived model (if needed) then warm-loads `serve`.
 // The result is keyed by the base tag so the UI/launch chain can react.
-func (m Model) loadServeCmd(base, serve string, params map[string]any, keepAlive string) tea.Cmd {
+func (m Model) loadServeCmd(base, serve, key string, params map[string]any, keepAlive string) tea.Cmd {
 	be := m.opts.Backend
 	create := serve != base
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 		defer cancel()
 		if create {
+			// Recreating an existing derived tag with new params replaces its
+			// definition; the subsequent Load reloads the runner so the new
+			// context/split takes effect in place behind the stable serve tag.
 			if err := be.Create(ctx, serve, base, params); err != nil {
 				return actionResultMsg{action: "load", tag: base, err: fmt.Errorf("create %s: %w", serve, err)}
 			}
 		}
 		err := be.Load(ctx, serve, keepAlive)
-		return actionResultMsg{action: "load", tag: base, err: err}
+		return actionResultMsg{action: "load", tag: base, appliedKey: key, err: err}
 	}
 }
 
@@ -471,6 +477,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.action {
 		case "load":
+			// Record which config is now resident so a later context/split
+			// change is detected as needing a reload (the serve tag is stable).
+			m.applied[msg.tag] = msg.appliedKey
 			// Chained "load → open OpenCode" once the (re)load completes.
 			if m.launchAfter == msg.tag {
 				m.launchAfter = ""
@@ -486,11 +495,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errMsg = ""
 			return m, m.pollCmd()
 		case "unload":
+			delete(m.applied, msg.tag)
 			cmd := m.setStatus("unloaded " + msg.tag)
 			return m, tea.Batch(cmd, m.pollCmd())
 		case "delete":
 			cmd := m.setStatus("deleted " + msg.tag)
 			delete(m.configs, msg.tag)
+			delete(m.applied, msg.tag)
 			return m, tea.Batch(cmd, m.listCmd(), m.pollCmd())
 		}
 		return m, nil
@@ -619,6 +630,28 @@ func (m Model) loadedFor(base string) (server.LoadedModel, string, bool) {
 	return server.LoadedModel{}, "", false
 }
 
+// loadedCurrent reports whether base is resident AND was loaded with its
+// currently-chosen context/GPU settings.
+//
+//   - Default config: the base model is served directly, so there are no baked
+//     params that could go stale — a resident base instance is always current.
+//   - Derived config: the serve tag is stable (":tuned"), so a tag match no
+//     longer implies the right params. We compare the recorded configKey of the
+//     resident load against the desired one; a mismatch (or an unrecorded load,
+//     e.g. resident from a previous run) means a reload is needed.
+func (m Model) loadedCurrent(base string) bool {
+	cfg := m.ensureConfig(base)
+	mode := m.opts.DeviceMode
+	_, actual, loaded := m.loadedFor(base)
+	if !loaded {
+		return false
+	}
+	if !needsDerived(cfg, mode) {
+		return actual == base
+	}
+	return m.applied[base] == configKey(cfg, mode)
+}
+
 // ensureConfig returns the cached per-model config, loading it on first access.
 func (m *Model) ensureConfig(tag string) store.ModelConfig {
 	if c, ok := m.configs[tag]; ok {
@@ -704,14 +737,10 @@ func (m Model) launchOpenCode(base string) (tea.Model, tea.Cmd) {
 // (`opencode -s <id>`); "" opens a fresh session. If the model needs a (re)load
 // the session id is remembered and applied once the load completes.
 func (m Model) launchOpenCodeSession(base, sessionID string) (tea.Model, tea.Cmd) {
-	cfg := m.ensureConfig(base)
-	serve := serveTag(base, cfg, m.opts.DeviceMode)
-
-	// The serve tag fully encodes the bakeable params (context, GPU layers), so
-	// the resident instance is correct iff it's loaded *as* the serve tag.
-	// Otherwise reload with the current config, then chain the launch.
-	_, actual, loaded := m.loadedFor(base)
-	if !loaded || actual != serve {
+	// The resident instance is correct iff it was loaded with the current
+	// context/GPU settings. Otherwise reload to apply them, then chain the
+	// launch once the (re)load completes.
+	if !m.loadedCurrent(base) {
 		m.launchAfter = base
 		m.launchSession = sessionID
 		return m.doLoad(base)

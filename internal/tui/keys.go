@@ -98,15 +98,13 @@ func (m Model) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = tag + " " + st + " in progress…"
 			return m, nil
 		}
-		// loadedFor reports the resident instance's serve tag; serveTag encodes
-		// the VRAM-affecting settings (context + GPU layers). When they match,
-		// open OpenCode. When they differ — i.e. a VRAM-affecting setting changed
-		// since load — (re)load to apply it and STOP at the "loaded — [⏎]
-		// continue" prompt, so the new split/VRAM can be measured before
-		// launching. doLoad does not chain a launch, so this never opens OpenCode
-		// until the model is resident with the chosen settings.
-		serve := serveTag(tag, m.ensureConfig(tag), m.opts.DeviceMode)
-		if _, actual, loaded := m.loadedFor(tag); loaded && actual == serve {
+		// When the resident instance already matches the chosen context + GPU
+		// layers, open OpenCode. When a VRAM-affecting setting changed since
+		// load, (re)load to apply it and STOP at the "loaded — [⏎] continue"
+		// prompt, so the new split/VRAM can be measured before launching.
+		// doLoad does not chain a launch, so this never opens OpenCode until the
+		// model is resident with the chosen settings.
+		if m.loadedCurrent(tag) {
 			return m.launchOpenCode(tag)
 		}
 		return m.doLoad(tag)
@@ -209,14 +207,17 @@ func (m Model) doLoad(base string) (tea.Model, tea.Cmd) {
 	keepAlive := cfg.Residency.KeepAlive()
 
 	// Already resident with the right config and nothing to launch? No-op.
-	if _, actual, loaded := m.loadedFor(base); loaded && actual == serve && m.launchAfter != base {
+	if m.loadedCurrent(base) && m.launchAfter != base {
 		m.setError(base + " is already loaded")
 		return m, nil
 	}
 
 	var cmds []tea.Cmd
-	// Only one model loaded at a time — unload anything else (incl. a stale
-	// derived variant of this same base).
+	// Only one model loaded at a time — unload everything except the serve tag
+	// we're about to load. When only the context/split changed, the resident
+	// instance already carries the (stable) serve tag, so it's left in place and
+	// the upcoming Create+Load reloads it with the new params rather than racing
+	// an unload against the reload.
 	var swapped int
 	for _, lm := range m.loaded {
 		if lm.Tag == serve {
@@ -236,7 +237,7 @@ func (m Model) doLoad(base string) (tea.Model, tea.Cmd) {
 		note = "swapping → " + base + " (freeing VRAM first)…"
 	}
 	cmds = append(cmds, m.setStatus(note))
-	cmds = append(cmds, m.loadServeCmd(base, serve, derivedParams(cfg, mode), keepAlive))
+	cmds = append(cmds, m.loadServeCmd(base, serve, configKey(cfg, mode), derivedParams(cfg, mode), keepAlive))
 	// No animation timer: the load view is static, and the 2s poll keeps state
 	// (and the actionResult on completion) live.
 	return m, tea.Batch(cmds...)

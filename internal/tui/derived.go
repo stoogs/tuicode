@@ -58,21 +58,33 @@ func needsDerived(cfg store.ModelConfig, mode hw.DeviceMode) bool {
 }
 
 // serveTag returns the tag OpenCode/Ollama should actually serve: the base tag
-// when everything is default, otherwise a derived tag encoding the baked params.
+// when everything is default, otherwise a STABLE derived tag (":tuned").
+//
+// The tag is deliberately independent of the chosen context/GPU values. An
+// OpenCode session pins the exact model id it was started with, so a session
+// resumed with `-s` keeps resolving to this same tag even after you change the
+// context or split — the derived model is recreated *in place* with the new
+// params, and the continued session picks them up. (Encoding the params into
+// the name would orphan the session on its old, now-stale variant.) configKey
+// captures the actual baked values for reload detection.
 func serveTag(base string, cfg store.ModelConfig, mode hw.DeviceMode) string {
 	if !needsDerived(cfg, mode) {
 		return base
 	}
-	ctxPart := "d"
+	return derivedPrefix + sanitizeTag(base) + ":tuned"
+}
+
+// configKey encodes the bakeable parameters (context + GPU layers) for a config.
+// It is NOT a model name — it's an in-memory key used to tell whether the
+// resident derived model was loaded with the currently-chosen settings, so a
+// changed context or split triggers a reload instead of silently reusing the
+// stale instance behind the stable serve tag.
+func configKey(cfg store.ModelConfig, mode hw.DeviceMode) string {
+	ctx := 0
 	if cfg.ContextLength > 0 {
-		ctxPart = fmt.Sprintf("%d", cfg.ContextLength)
+		ctx = cfg.ContextLength
 	}
-	gpu := effectiveNumGPU(cfg, mode)
-	gpuPart := "a"
-	if gpu >= 0 {
-		gpuPart = fmt.Sprintf("%d", gpu)
-	}
-	return derivedPrefix + sanitizeTag(base) + ":c" + ctxPart + "g" + gpuPart
+	return fmt.Sprintf("c%dg%d", ctx, effectiveNumGPU(cfg, mode))
 }
 
 // derivedParams builds the Modelfile parameters baked into the derived model.

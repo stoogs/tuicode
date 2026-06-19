@@ -155,14 +155,15 @@ func TestDeleteConfirmFlow(t *testing.T) {
 	}
 }
 
-// Regression: a model with a non-default context is resident under its derived
-// tag, so Enter/o must recognize it as loaded (via loadedFor) and open OpenCode
-// rather than try to reload it.
+// Regression: a model with a non-default context is resident under its (stable)
+// derived tag and was loaded with the current settings, so Enter/o must
+// recognize it as loaded (via loadedCurrent) and open OpenCode rather than
+// reload it.
 func TestEnterOpensModelLoadedAsDerived(t *testing.T) {
 	base := "a:1b"
 	be := &fakeBackend{reachable: true,
 		disk:   []server.DiskModel{{Tag: base, Size: gib, ParamSize: "1B", Quant: "Q4_K_M"}},
-		loaded: []server.LoadedModel{{Tag: "tuicode/a-1b:c8192ga", Size: gib, SizeVRAM: gib, Context: 8192}},
+		loaded: []server.LoadedModel{{Tag: "tuicode/a-1b:tuned", Size: gib, SizeVRAM: gib, Context: 8192}},
 	}
 	opts := testOpts(t, be, true)
 	m := New(opts)
@@ -172,9 +173,12 @@ func TestEnterOpensModelLoadedAsDerived(t *testing.T) {
 	cfg := m.ensureConfig(base)
 	cfg.ContextLength = 8192
 	m.configs[base] = cfg
+	// Record that this session loaded the model with the current config, so the
+	// stable serve tag is recognized as already-correct (no reload).
+	m.applied[base] = configKey(cfg, hw.Auto)
 
 	// sanity: the derived serve tag matches what's resident
-	if serveTag(base, cfg, hw.Auto) != "tuicode/a-1b:c8192ga" {
+	if serveTag(base, cfg, hw.Auto) != "tuicode/a-1b:tuned" {
 		t.Fatalf("serveTag = %q", serveTag(base, cfg, hw.Auto))
 	}
 
@@ -195,8 +199,37 @@ func TestEnterOpensModelLoadedAsDerived(t *testing.T) {
 	}
 	var doc map[string]any
 	json.Unmarshal(data, &doc)
-	if doc["model"] != "ollama/tuicode/a-1b:c8192ga" {
+	if doc["model"] != "ollama/tuicode/a-1b:tuned" {
 		t.Errorf("default model = %v, want the derived serve tag", doc["model"])
+	}
+}
+
+// A model resident under the stable derived tag but loaded with a STALE config
+// (e.g. context bumped since it was loaded) must reload so the new settings take
+// effect — the tag matching is no longer sufficient.
+func TestEnterReloadsWhenConfigChanged(t *testing.T) {
+	base := "a:1b"
+	be := &fakeBackend{reachable: true,
+		disk:   []server.DiskModel{{Tag: base, Size: gib, ParamSize: "1B", Quant: "Q4_K_M"}},
+		loaded: []server.LoadedModel{{Tag: "tuicode/a-1b:tuned", Size: gib, SizeVRAM: gib, Context: 8192}},
+	}
+	m := New(testOpts(t, be, true))
+	m.disk = be.disk
+	m.loaded = be.loaded
+	m.screen = screenDashboard
+	cfg := m.ensureConfig(base)
+	cfg.ContextLength = 8192
+	m.configs[base] = cfg
+	m.applied[base] = configKey(cfg, hw.Auto) // resident at 8k
+
+	// User bumps the context to 16k; the resident 8k instance is now stale.
+	cfg.ContextLength = 16384
+	m.configs[base] = cfg
+
+	model, _ := m.updateDashboard(tea.KeyMsg{Type: tea.KeyEnter})
+	mm := model.(Model)
+	if mm.pending[base] != "load" {
+		t.Errorf("Enter after a context change should reload; pending=%v", mm.pending)
 	}
 }
 
@@ -205,11 +238,11 @@ func TestPruneDerived(t *testing.T) {
 		reachable: true,
 		disk: []server.DiskModel{
 			{Tag: "a:1b", Size: gib},                  // base — keep
-			{Tag: "tuicode/a-1b:c8192ga", Size: gib},  // derived, loaded — keep
-			{Tag: "tuicode/a-1b:c16384ga", Size: gib}, // derived, unused — prune
-			{Tag: "tuicode/b-2b:c8192g0", Size: gib},  // derived, unused — prune
+			{Tag: "tuicode/a-1b:tuned", Size: gib},    // derived, loaded — keep
+			{Tag: "tuicode/a-1b:c16384ga", Size: gib}, // stale derived (old scheme), unused — prune
+			{Tag: "tuicode/b-2b:tuned", Size: gib},    // derived, unused — prune
 		},
-		loaded: []server.LoadedModel{{Tag: "tuicode/a-1b:c8192ga", Size: gib, SizeVRAM: gib}},
+		loaded: []server.LoadedModel{{Tag: "tuicode/a-1b:tuned", Size: gib, SizeVRAM: gib}},
 	}
 	n, err := pruneDerived(context.Background(), be)
 	if err != nil {
@@ -218,7 +251,7 @@ func TestPruneDerived(t *testing.T) {
 	if n != 2 {
 		t.Errorf("pruned %d, want 2", n)
 	}
-	want := map[string]bool{"tuicode/a-1b:c16384ga": true, "tuicode/b-2b:c8192g0": true}
+	want := map[string]bool{"tuicode/a-1b:c16384ga": true, "tuicode/b-2b:tuned": true}
 	for _, d := range be.deleteCalls {
 		if !want[d] {
 			t.Errorf("unexpected delete of %q (base or loaded derived)", d)
@@ -232,7 +265,7 @@ func TestPruneDerived(t *testing.T) {
 func TestDerivedModelsHiddenFromList(t *testing.T) {
 	be := &fakeBackend{reachable: true, disk: []server.DiskModel{
 		{Tag: "a:1b", Size: gib},
-		{Tag: "tuicode/a-1b:c8192ga", Size: gib}, // derived — must be hidden
+		{Tag: "tuicode/a-1b:tuned", Size: gib}, // derived — must be hidden
 	}}
 	m := New(testOpts(t, be, true))
 	model, _ := m.Update(listResultMsg{disk: be.disk})

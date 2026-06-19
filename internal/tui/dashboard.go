@@ -24,10 +24,10 @@ const (
 // status column — a model's state is shown by the row colour (green = loaded,
 // yellow = loading, red = stopping/deleting).
 //
-//	★ MODEL SIZE PARAMS ON CTX GPU PRESET
+//	★ MODEL SIZE PARAMS GPU/CPU CTX GPU PRESET
 var (
-	colWidths      = []int{1, 21, 6, 12, 4, 7, 6, 14}
-	colHeaders     = []string{"★", "MODEL", "SIZE", "PARAMS", "ON", "CTX", "GPU", "PRESET"}
+	colWidths      = []int{1, 21, 6, 12, 8, 7, 6, 14}
+	colHeaders     = []string{"★", "MODEL", "SIZE", "PARAMS", "GPU/CPU", "CTX", "GPU", "PRESET"}
 	editableIdx    = []int{5, 6, 7} // CTX, GPU, PRESET
 	tableWidthHint = sum(colWidths) + len(colWidths) + 1
 )
@@ -334,11 +334,11 @@ func (m Model) renderRow(i int, dm server.DiskModel) string {
 // Prefer (m Model).gpuChoices, which caps the steps at the model's actual layers.
 var numGPUChoices = gpuChoicesUpTo(96)
 
-// gpuChoicesUpTo builds the offload steps: auto, CPU (0), every 4 layers up to
+// gpuChoicesUpTo builds the offload steps: auto, CPU (0), every 2 layers up to
 // max, then "all" (99 = offload everything).
 func gpuChoicesUpTo(max int) []int {
 	c := []int{store.NumGPUAuto, 0}
-	for n := 4; n < max; n += 4 {
+	for n := 2; n < max; n += 2 {
 		c = append(c, n)
 	}
 	return append(c, 99) // 99 = "all" layers
@@ -984,15 +984,16 @@ func contextShort(ctx int) string {
 	return fmt.Sprintf("%d", ctx)
 }
 
-// shortProc renders the GPU/CPU split compactly: "GPU", "CPU", or "42%G".
+// shortProc renders the GPU/CPU split for the GPU/CPU column: "100% GPU",
+// "100% CPU", or a "50%/50%" (GPU/CPU) share when the model is split.
 func shortProc(lm server.LoadedModel) string {
 	g := lm.GPUPercent()
 	switch {
 	case g >= 100:
-		return "GPU"
+		return "100% GPU"
 	case g <= 0:
-		return "CPU"
+		return "100% CPU"
 	default:
-		return fmt.Sprintf("%d%%G", g)
+		return fmt.Sprintf("%d%%/%d%%", g, 100-g)
 	}
 }

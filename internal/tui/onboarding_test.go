@@ -90,15 +90,15 @@ func TestGPUChoicesCapsAtLayerCount(t *testing.T) {
 	} else if c[len(c)-2] < 80 {
 		t.Errorf("fallback should reach high layer counts, got %v", c)
 	}
-	// Known 27-layer model → steps stop at 24, then "all" (99).
+	// Known 27-layer model → steps stop at 26 (last even below 27), then "all" (99).
 	m.details["small:4b"] = server.ModelDetails{Tag: "small:4b", BlockCount: 27}
 	c := m.gpuChoices("small:4b")
 	if c[len(c)-1] != 99 {
 		t.Fatalf("expected trailing 99 (all), got %v", c)
 	}
 	maxStep := c[len(c)-2]
-	if maxStep != 24 {
-		t.Errorf("27-layer model should step to 24 then all, got max step %d (%v)", maxStep, c)
+	if maxStep != 26 {
+		t.Errorf("27-layer model should step to 26 then all, got max step %d (%v)", maxStep, c)
 	}
 	for _, n := range c {
 		if n > 27 && n != 99 {
