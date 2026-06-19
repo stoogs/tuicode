@@ -150,7 +150,7 @@ func (m Model) viewSettings() string {
 	}
 	for _, r := range rows {
 		cursor := "  "
-		label := padRight(r.label, 18)
+		label := padRight(r.label, 20)
 		val := r.value
 		if r.idx == m.settingsCursor {
 			cursor = accentStyle.Render("▸ ")
@@ -164,13 +164,23 @@ func (m Model) viewSettings() string {
 			val = mutedStyle.Render(val)
 		}
 		b.WriteString(cursor + label + val + "\n")
+		// Visually group the compaction block away from the paths/env below.
+		if r.idx == setReservePct {
+			b.WriteString("\n")
+		}
 	}
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("Default context seeds new models (each keeps its own once you change its CTX)."))
+	b.WriteString(mutedStyle.Render("Compaction keeps long OpenCode sessions inside the context window:"))
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("Auto-compact/prune/reserve are deep-merged into opencode.json (your other"))
+	b.WriteString(mutedStyle.Render("  • Auto-compact — summarise older turns when the window fills."))
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("compaction keys are preserved) — reserve scales with the model's context."))
+	b.WriteString(mutedStyle.Render("  • Prune tool outputs — drop earlier tool results (big file reads, command"))
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render("    output) to reclaim tokens while keeping the conversation."))
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render("  • Reserve — headroom kept free; scales with the model's context."))
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render("Written (deep-merged) to opencode.json on the next launch — no restart."))
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render("Turn off 'Manage compaction' to hand-maintain that block yourself."))
 	b.WriteString("\n\n")
@@ -273,15 +283,16 @@ func onOff(b bool) string {
 // manageLabel describes the compaction master switch.
 func manageLabel(manage bool) string {
 	if manage {
-		return "on   (tuicode writes it; your other keys preserved)"
+		return "on   (tuicode merges its keys)"
 	}
-	return "off  (left untouched — hand-maintain in opencode.json)"
+	return "off  (your block left untouched)"
 }
 
-// compactSub annotates a sub-setting that only applies when compaction is managed.
+// compactSub annotates a sub-setting that has no effect while compaction
+// management is off (it isn't written to opencode.json).
 func compactSub(val string, manage bool) string {
 	if !manage {
-		return val + "   (not written)"
+		return val + "   (disabled)"
 	}
 	return val
 }
@@ -298,7 +309,7 @@ func ctxDefaultLabel(ctx int) string {
 // reserveLabel renders the compaction-reserve percentage.
 func reserveLabel(pct int) string {
 	if pct <= 0 {
-		return "off (OpenCode default headroom)"
+		return "off  (OpenCode default)"
 	}
-	return strconv.Itoa(pct) + "% of context   (compact at ~" + strconv.Itoa(100-pct) + "% full)"
+	return strconv.Itoa(pct) + "%  (compact at ~" + strconv.Itoa(100-pct) + "% full)"
 }
