@@ -26,7 +26,7 @@ const (
 //
 //	★ MODEL SIZE PARAMS GPU/CPU CTX GPU PRESET
 var (
-	colWidths      = []int{1, 21, 6, 12, 8, 7, 6, 14}
+	colWidths      = []int{1, 21, 6, 12, 8, 7, 7, 14}
 	colHeaders     = []string{"★", "MODEL", "SIZE", "PARAMS", "GPU/CPU", "CTX", "GPU", "PRESET"}
 	editableIdx    = []int{5, 6, 7} // CTX, GPU, PRESET
 	tableWidthHint = sum(colWidths) + len(colWidths) + 1
@@ -289,12 +289,18 @@ func (m Model) renderRow(i int, dm server.DiskModel) string {
 	}
 	onCell := styled(cell(onStr, colWidths[4]), noStyle)
 
-	// editable values, in the same order as editableIdx (CTX, GPU, PRESET)
-	ctxStr := contextShort(cfg.ContextLength)
+	// editable values, in the same order as editableIdx (CTX, GPU, PRESET).
+	// Show the *stored* context — "default" when following the global default,
+	// the explicit value otherwise — so "default" reads as a distinct stop you
+	// can step back down to. The mismatch check still uses the effective value.
+	ctxStr := contextShort(m.ensureConfig(dm.Tag).ContextLength)
 	if loaded && cfg.ContextLength > 0 && lm.Context > 0 && lm.Context != cfg.ContextLength {
-		ctxStr += "*" // configured value differs from the loaded value (reload to apply)
+		ctxStr += "*" // effective context differs from the loaded value (reload to apply)
 	}
-	gpuStr := numGPUShort(cfg, m.opts.DeviceMode)
+	gpuStr := numGPUShort(cfg, m.opts.DeviceMode, m.layerCount(dm.Tag))
+	if m.detection.Unified && m.opts.DeviceMode != hw.CPUOnly {
+		gpuStr = "—" // GPU split is automatic on unified memory
+	}
 	presetStr := store.Presets()[matchPreset(cfg.Parameters)].Name
 	cpuForced := m.opts.DeviceMode == hw.CPUOnly
 
@@ -354,8 +360,19 @@ func (m Model) gpuChoices(tag string) []int {
 	return numGPUChoices
 }
 
-// numGPUShort renders the GPU-layers cell value.
-func numGPUShort(cfg store.ModelConfig, mode hw.DeviceMode) string {
+// layerCount returns the model's transformer-layer count from `ollama show`
+// (0 if not fetched/known yet).
+func (m Model) layerCount(tag string) int {
+	if d, ok := m.details[tag]; ok {
+		return d.BlockCount
+	}
+	return 0
+}
+
+// numGPUShort renders the GPU-layers cell value. When the model's total layer
+// count is known (total > 0), an explicit offload shows as "N/total" so you can
+// see how many layers there are to split across the GPU/CPU.
+func numGPUShort(cfg store.ModelConfig, mode hw.DeviceMode, total int) string {
 	if mode == hw.CPUOnly {
 		return "cpu!" // forced by device mode
 	}
@@ -367,12 +384,15 @@ func numGPUShort(cfg store.ModelConfig, mode hw.DeviceMode) string {
 	case cfg.NumGPU >= 99:
 		return "all"
 	default:
+		if total > 0 {
+			return fmt.Sprintf("%d/%d", cfg.NumGPU, total)
+		}
 		return fmt.Sprintf("%d", cfg.NumGPU)
 	}
 }
 
 // numGPULabel is a verbose form for status messages.
-func numGPULabel(cfg store.ModelConfig, mode hw.DeviceMode) string {
+func numGPULabel(cfg store.ModelConfig, mode hw.DeviceMode, total int) string {
 	if mode == hw.CPUOnly {
 		return "cpu (forced by device mode)"
 	}
@@ -382,8 +402,14 @@ func numGPULabel(cfg store.ModelConfig, mode hw.DeviceMode) string {
 	case cfg.NumGPU == 0:
 		return "cpu (0 layers)"
 	case cfg.NumGPU >= 99:
+		if total > 0 {
+			return fmt.Sprintf("all %d layers", total)
+		}
 		return "all layers"
 	default:
+		if total > 0 {
+			return fmt.Sprintf("%d/%d layers", cfg.NumGPU, total)
+		}
 		return fmt.Sprintf("%d layers", cfg.NumGPU)
 	}
 }
@@ -611,7 +637,7 @@ func (m Model) splitLine(tag string, lm server.LoadedModel, loaded bool) string 
 		return fmt.Sprintf("split     %s · ~%gGB  (%s)", splitLabel(r.GPUPercent), r.MemGB, ref)
 	}
 	cfg := m.ensureConfig(tag)
-	return "split     " + numGPULabel(cfg, m.opts.DeviceMode) + " offload — load to measure"
+	return "split     " + numGPULabel(cfg, m.opts.DeviceMode, m.layerCount(tag)) + " offload — load to measure"
 }
 
 // predictSplit estimates the CPU/GPU split and VRAM use for the selected model

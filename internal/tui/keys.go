@@ -71,13 +71,13 @@ func (m Model) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// column navigation (the editable columns) — arrows + Tab (l is "load")
 	case "left":
-		m.dashCol = wrap(m.dashCol-1, colCount)
+		m.dashCol = m.stepCol(-1)
 		return m, nil
 	case "right", "tab":
-		m.dashCol = wrap(m.dashCol+1, colCount)
+		m.dashCol = m.stepCol(+1)
 		return m, nil
 	case "shift+tab":
-		m.dashCol = wrap(m.dashCol-1, colCount)
+		m.dashCol = m.stepCol(-1)
 		return m, nil
 
 	// value change on the focused column
@@ -180,6 +180,11 @@ func (m Model) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // cycleDevice advances the device mode and re-detects memory.
 func (m Model) cycleDevice() (tea.Model, tea.Cmd) {
+	if m.deviceLocked() {
+		m.status = "device mode is fixed to gpu-only on unified memory"
+		m.errMsg = ""
+		return m, nil
+	}
 	modes := []hw.DeviceMode{hw.Auto, hw.CPUOnly, hw.GPUOnly}
 	cur := 0
 	for i, mode := range modes {
@@ -231,7 +236,7 @@ func (m Model) doLoad(base string) (tea.Model, tea.Cmd) {
 	m.pending[base] = "load"
 	note := "loading " + base + "…"
 	if cfg.ContextLength > 0 || effectiveNumGPU(cfg, mode) >= 0 {
-		note = fmt.Sprintf("loading %s (ctx %s, gpu %s)…", base, contextShort(cfg.ContextLength), numGPULabel(cfg, mode))
+		note = fmt.Sprintf("loading %s (ctx %s, gpu %s)…", base, contextShort(cfg.ContextLength), numGPULabel(cfg, mode, m.layerCount(base)))
 	}
 	if swapped > 0 {
 		note = "swapping → " + base + " (freeing VRAM first)…"
@@ -255,6 +260,27 @@ func (m Model) doUnload(base string) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmd, m.unloadCmd(actual))
 }
 
+// colEnabled reports whether an editable column is interactive. The GPU-layers
+// column is locked (auto) on unified memory, so it's skipped/non-editable there.
+func (m Model) colEnabled(col int) bool {
+	if col == colNumGPU && m.detection.Unified {
+		return false
+	}
+	return true
+}
+
+// stepCol moves the column cursor by dir, wrapping and skipping locked columns.
+func (m Model) stepCol(dir int) int {
+	col := m.dashCol
+	for i := 0; i < colCount; i++ {
+		col = wrap(col+dir, colCount)
+		if m.colEnabled(col) {
+			return col
+		}
+	}
+	return m.dashCol
+}
+
 // adjustColumn changes the focused editable column on the selected model and
 // persists the per-model config.
 func (m Model) adjustColumn(dir int) (tea.Model, tea.Cmd) {
@@ -262,19 +288,25 @@ func (m Model) adjustColumn(dir int) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+	if !m.colEnabled(m.dashCol) {
+		m.status = "GPU split is automatic on unified memory — tune context instead"
+		m.errMsg = ""
+		return m, nil
+	}
 	cfg := m.ensureConfig(tag)
 	switch m.dashCol {
 	case colContext:
-		// Step from the effective value so a model following the global default
-		// nudges up/down from there; stepping back to 0 follows the default again.
-		i := indexInt(contextChoices, m.effectiveContext(cfg))
+		// Step on the stored value so "default" (0) is a real bottom backstop you
+		// can land on and stay (the global default then applies); stepping up from
+		// there pins explicit values.
+		i := indexInt(contextChoices, cfg.ContextLength)
 		cfg.ContextLength = contextChoices[clamp(i+dir, 0, len(contextChoices)-1)]
 		m.status = tag + " context → " + contextLabel(cfg.ContextLength)
 	case colNumGPU:
 		choices := m.gpuChoices(tag)
 		i := indexInt(choices, cfg.NumGPU)
 		cfg.NumGPU = choices[clamp(i+dir, 0, len(choices)-1)]
-		m.status = tag + " gpu layers → " + numGPULabel(cfg, m.opts.DeviceMode)
+		m.status = tag + " gpu layers → " + numGPULabel(cfg, m.opts.DeviceMode, m.layerCount(tag))
 	case colPreset:
 		presets := store.Presets()
 		cur := matchPreset(cfg.Parameters)

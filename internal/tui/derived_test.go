@@ -71,6 +71,38 @@ func TestGlobalDefaultContextFollows(t *testing.T) {
 	}
 }
 
+// With a non-zero global default, the CTX column must still let you land on
+// "default" (stored 0) as a sticky bottom stop and step back up from it.
+func TestContextColumnDefaultBackstop(t *testing.T) {
+	be := &fakeBackend{reachable: true, disk: []server.DiskModel{{Tag: "a:1b", Size: gib}}}
+	m := New(testOpts(t, be, true))
+	m.disk = be.disk
+	m.screen = screenDashboard
+	m.dashCursor = 0
+	m.dashCol = colContext
+	m.opts.AppConfig.DefaultContext = 65536 // global default 64k
+	base := "a:1b"
+
+	// Down at default (stored 0) stays at default — the reachable backstop, even
+	// though it resolves to the 64k global default.
+	model, _ := m.updateDashboard(runes(","))
+	m = model.(Model)
+	if got := m.ensureConfig(base).ContextLength; got != 0 {
+		t.Errorf("down at default should stay 0 (backstop), got %d", got)
+	}
+	// Up pins the smallest explicit context; down returns to default.
+	model, _ = m.updateDashboard(runes("."))
+	m = model.(Model)
+	if got := m.ensureConfig(base).ContextLength; got != 4096 {
+		t.Errorf("up from default should pin 4096, got %d", got)
+	}
+	model, _ = m.updateDashboard(runes(","))
+	m = model.(Model)
+	if got := m.ensureConfig(base).ContextLength; got != 0 {
+		t.Errorf("down from 4k should return to default, got %d", got)
+	}
+}
+
 func TestLaunchWritesLimitAndCompaction(t *testing.T) {
 	base := "a:1b"
 	be := &fakeBackend{reachable: true, disk: []server.DiskModel{{Tag: base, Size: gib}}}
@@ -111,6 +143,43 @@ func TestLaunchWritesLimitAndCompaction(t *testing.T) {
 	}
 	if limit["context"].(float64) != 32768 {
 		t.Errorf("limit.context = %v, want 32768", limit["context"])
+	}
+}
+
+func TestUnifiedMemoryLocksGPUSplit(t *testing.T) {
+	be := &fakeBackend{reachable: true, disk: []server.DiskModel{{Tag: "a:1b", Size: gib}}}
+	m := New(testOpts(t, be, true))
+	m.disk = be.disk
+	m.screen = screenDashboard
+	base := "a:1b"
+
+	// User had previously pinned a manual offload.
+	cfg := m.ensureConfig(base)
+	cfg.NumGPU = 20
+	m.configs[base] = cfg
+
+	// Discrete GPU: the manual value is honoured.
+	m.detection = hw.Detection{Unified: false}
+	if got := m.servedConfig(base).NumGPU; got != 20 {
+		t.Errorf("discrete: served NumGPU = %d, want 20 (honoured)", got)
+	}
+
+	// Unified memory: the split is forced back to auto regardless of the stored
+	// value (the guard), and the GPU column is skipped in navigation.
+	m.detection = hw.Detection{Unified: true}
+	if got := m.servedConfig(base).NumGPU; got != store.NumGPUAuto {
+		t.Errorf("unified: served NumGPU = %d, want auto (%d)", got, store.NumGPUAuto)
+	}
+	if m.colEnabled(colNumGPU) {
+		t.Error("unified: GPU column should be disabled")
+	}
+	m.dashCol = colContext
+	if next := m.stepCol(+1); next == colNumGPU {
+		t.Error("unified: column nav should skip the GPU column")
+	}
+	// The stored config is untouched (only the served view is forced).
+	if m.ensureConfig(base).NumGPU != 20 {
+		t.Error("stored NumGPU should be preserved, not overwritten")
 	}
 }
 

@@ -184,6 +184,36 @@ func TestLoadFromDashboardUsesResidencyKeepAlive(t *testing.T) {
 	}
 }
 
+func TestDeviceModeLockedOnMac(t *testing.T) {
+	be := &fakeBackend{reachable: true}
+
+	// On a Mac, New pins gpu-only regardless of a (stale) persisted value, and
+	// both entry points to change it are no-ops.
+	opts := testOpts(t, be, true)
+	opts.Deps.Distro = deps.Distro{Family: deps.MacOS}
+	opts.DeviceMode = hw.CPUOnly
+	m := New(opts)
+	if m.opts.DeviceMode != hw.GPUOnly {
+		t.Errorf("mac device mode = %v, want gpu-only", m.opts.DeviceMode)
+	}
+	if !m.deviceLocked() {
+		t.Fatal("device should be locked on mac")
+	}
+	if model, _ := m.cycleDevice(); model.(Model).opts.DeviceMode != hw.GPUOnly {
+		t.Error("the 'd' key should not change device mode on mac")
+	}
+	m.settingsCursor = setDevice
+	if model, _ := m.adjustSetting(+1); model.(Model).opts.DeviceMode != hw.GPUOnly {
+		t.Error("Settings should not change device mode on mac")
+	}
+
+	// A non-Mac (empty distro) still cycles freely.
+	m2 := New(testOpts(t, be, true))
+	if m2.deviceLocked() {
+		t.Error("non-mac should not be device-locked")
+	}
+}
+
 func TestEnterOpensOpenCodeWhenLoaded(t *testing.T) {
 	be := &fakeBackend{reachable: true,
 		disk:   []server.DiskModel{{Tag: "a:1b", Size: gib}},

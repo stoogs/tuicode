@@ -57,9 +57,9 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "down", "j", "tab":
 		m.settingsCursor = m.stepSetting(+1)
 		return m, nil
-	case "left", "h":
+	case "left", "h", ",", "<":
 		return m.adjustSetting(-1)
-	case "right", "l":
+	case "right", "l", ".", ">":
 		return m.adjustSetting(+1)
 	}
 	return m, nil
@@ -96,6 +96,11 @@ func (m Model) stepSetting(dir int) int {
 func (m Model) adjustSetting(dir int) (tea.Model, tea.Cmd) {
 	switch m.settingsCursor {
 	case setDevice:
+		if m.deviceLocked() {
+			m.status = "device mode is fixed to gpu-only on unified memory"
+			m.errMsg = ""
+			return m, nil
+		}
 		modes := []hw.DeviceMode{hw.Auto, hw.CPUOnly, hw.GPUOnly}
 		cur := 0
 		for i, mode := range modes {
@@ -168,7 +173,7 @@ func (m Model) viewSettings() string {
 		value string
 		edit  bool
 	}{
-		{setDevice, "Device mode", string(m.opts.DeviceMode), true},
+		{setDevice, "Device mode", deviceModeValue(m), !m.deviceLocked()},
 		{setDefaultContext, "Default context", ctxDefaultLabel(m.opts.AppConfig.DefaultContext), true},
 		{setManageCompaction, "Manage compaction", manageLabel(m.opts.AppConfig.Compaction.Manage), true},
 		{setCompactAuto, "    Auto-compact", onOff(c.Auto), true},
@@ -248,7 +253,7 @@ func (m Model) viewSettings() string {
 	b.WriteString("\n")
 	b.WriteString(footer(
 		[2]string{"↑↓", "field"},
-		[2]string{"←→", "change"},
+		[2]string{"←→ , .", "change"},
 		[2]string{"⏎", "run action"},
 		[2]string{"esc", "back"},
 	))
@@ -301,6 +306,15 @@ func onOff(b bool) string {
 	return "off"
 }
 
+// deviceModeValue renders the device-mode setting value, noting when it's fixed
+// (unified memory runs on Metal/GPU, so there's nothing to switch).
+func deviceModeValue(m Model) string {
+	if m.deviceLocked() {
+		return "gpu-only  (unified — fixed)"
+	}
+	return string(m.opts.DeviceMode)
+}
+
 // manageLabel describes the compaction master switch.
 func manageLabel(manage bool) string {
 	if manage {
@@ -314,6 +328,9 @@ func manageLabel(manage bool) string {
 func (m Model) settingHelp() string {
 	switch m.settingsCursor {
 	case setDevice:
+		if m.deviceLocked() {
+			return "Fixed on unified memory — the model always runs on the GPU (Metal)."
+		}
 		return "Which memory pool drives fit estimates: auto / cpu-only / gpu-only."
 	case setDefaultContext:
 		return "Seeds new models; each keeps its own value once you change its CTX."

@@ -3,8 +3,8 @@
 A terminal dashboard for running local LLMs with [OpenCode](https://opencode.ai),
 backed by [Ollama](https://ollama.com). From one always-on screen you see which
 models are loaded and their VRAM use, load/unload/swap models, set context and
-GPU offload, write a valid `opencode.json`, and launch OpenCode against the active
-model.
+GPU offload, set a global default context, tune OpenCode's auto-compaction, write
+a valid `opencode.json`, and launch OpenCode against the active model.
 
 Think of it as a **control panel for your local-LLM rig**: the dashboard is home,
 models are resources you start and stop (via Ollama), and OpenCode is a session
@@ -12,31 +12,41 @@ you launch on top of a loaded model.
 
 ```
 tuicode                                            device: auto · GPU 16GB · Ollama ●
-────────────────────────────────────────────────────────────────────────────────────
-┌──┬────────────────────┬───────┬─────────────┬─────┬────────┬──────┬──────────────┐
-│ ★│ MODEL              │ SIZE  │ PARAMS      │ ON  │ CTX    │ GPU  │ PRESET       │
-├──┼────────────────────┼───────┼─────────────┼─────┼────────┼──────┼──────────────┤
-│ ★│ qwen3-coder:30b    │ 9.9GB │ 30B Q4_K_M  │ GPU │ 64k    │ auto │ Coding       │  ← green (loaded)
-│  │ llama3.2:1b        │ 1.2GB │ 1B Q8_0     │ —   │ default│ cpu  │ Balanced     │
-└──┴────────────────────┴───────┴─────────────┴─────┴────────┴──────┴──────────────┘
+──────────────────────────────────────────────────────────────────────────────────────
+┌──┬────────────────────┬───────┬─────────────┬─────────┬────────┬───────┬────────────┐
+│ ★│ MODEL              │ SIZE  │ PARAMS      │ GPU/CPU │ CTX    │ GPU   │ PRESET     │
+├──┼────────────────────┼───────┼─────────────┼─────────┼────────┼───────┼────────────┤
+│ ★│ qwen3-coder:30b    │ 9.9GB │ 30B Q4_K_M  │ 100% GPU│ 64k    │ all   │ Coding     │  ← green (loaded)
+│  │ deepseek-r1:14b    │ 9.0GB │ 14B Q4_K_M  │ 60%/40% │ 32k    │ 24/40 │ Balanced   │
+│  │ llama3.2:1b        │ 1.2GB │ 1B Q8_0     │ —       │ default│ auto  │ Coding     │
+└──┴────────────────────┴───────┴─────────────┴─────────┴────────┴───────┴────────────┘
 
 INFO  qwen3-coder:30b
-  est. mem  14.8GB   weights 8.4 + ctx 64k ≈ 6.0   ✗ needs 16.8, only 14.0 free GPU
-  split     25%/75% CPU/GPU · ~20GB  (ref 16GB GPU)
+  est. mem  14.8GB   weights 8.4 + ctx 64k ≈ 6.0   ✓ fits (14.0 free GPU)
+  split     100% GPU · 14.8GB VRAM  (live)
   params     Coding · temp 0.60 · top_p 0.95 · top_k 40
 
 RAM   ▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░  8.6 / 62.7 GB
-VRAM  ▓▓▓▓▓▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒  1.9 / 15.9 GB   ▒ +14.8 to load
+VRAM  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒▒▒▒▒  14.8 / 15.9 GB
 
-[↑↓] model  [←→/tab] column  [,.] change  [⏎/l] load → open  [c] continue  [esc/u] unload
+[↑↓] model  [←→/tab] column  [, .] change  [⏎/l] load → open  [c] continue  [esc/u] unload
 ```
 
 Everything lives on **one page**. Every model on disk is a row, and the **row
 colour shows its state**: green = loaded, yellow = loading, red =
-stopping/deleting, normal = stopped (so there's no separate status column). The
-`ON` placement column updates as Ollama loads/unloads; the editable columns
-(`CTX`, `GPU`, `PRESET`) are changed inline (the focused cell is a bright silver
-cursor). `PARAMS` shows parameter size + quant
+stopping/deleting, normal = stopped (so there's no separate status column).
+
+- **`GPU/CPU`** — where a loaded model actually runs: `100% GPU`, `100% CPU`, or
+  a `60%/40%` (GPU/CPU) split. `—` when the model isn't loaded.
+- **`CTX`** — context window: `default` (follows the global
+  [Default context](#default-context)) or an explicit value (e.g. `64k`).
+- **`GPU`** — the *offload setting* you choose: `auto`, `cpu`, `all`, or
+  `N/total` layers (`24/40` = 24 of the model's 40 layers on the GPU, so you can
+  see how many there are to split over).
+- **`PRESET`** — sampler preset (Coding/Balanced/…).
+
+The editable columns (`CTX`, `GPU`, `PRESET`) are changed inline — the focused
+cell is a bright silver cursor. `PARAMS` shows parameter size + quant
 (e.g. `30B Q4_K_M`); the `★` column marks your **favourite** (pre-selected on
 startup).
 
@@ -65,10 +75,15 @@ selected model's footprint as `▒` (red if it would overflow), so you can see
 whether it'll fit before loading.
 
 **Managing the CPU/GPU split.** The split is set by how many model layers run on
-the GPU — the `GPU` column (`auto`/`cpu`/N layers/`all`), adjusted with `,`/`.`.
-Fewer GPU layers ⇒ more on CPU ⇒ lower VRAM but slower; `all` keeps everything on
-the GPU (fastest, if it fits). The `split` line tells you the resulting balance
-and VRAM cost so you can dial it in to fit.
+the GPU — the `GPU` column (`auto`/`cpu`/`N/total`/`all`), adjusted with `,`/`.`
+(stepping 2 layers at a time). Fewer GPU layers ⇒ more on CPU ⇒ lower VRAM but
+slower; `all` keeps everything on the GPU (fastest, if it fits). The `split` line
+tells you the resulting balance and VRAM cost so you can dial it in to fit.
+
+> On **Apple Silicon (unified memory)** this column is blanked (`—`) and locked:
+> a layer split saves no memory there and forcing it on only risks slowdowns/OOM,
+> so Ollama always auto-places and you tune fit with `CTX` instead. See
+> [Apple Silicon](#no-cpugpu-split-on-apple-silicon).
 
 ### Keys
 
@@ -76,8 +91,10 @@ and VRAM cost so you can dial it in to fit.
 - `←`/`→` (or `Tab`/`Shift-Tab`) — move across the editable columns
   (`CTX`, `GPU`, `PRESET`).
 - `,` / `.` — decrease / increase the focused column's value (saved instantly).
-  `CTX` steps in 4k (so you can fine-tune KV-cache footprint when VRAM is tight);
-  `GPU` sets GPU-offload layers (`auto`/`cpu`/N/`all`), stepped 4 layers at a time.
+  `CTX` steps in 4k (so you can fine-tune KV-cache footprint when VRAM is tight),
+  with `default` as a sticky bottom stop that follows the global
+  [Default context](#default-context); `GPU` sets GPU-offload layers
+  (`auto`/`cpu`/`N/total`/`all`), stepped 2 layers at a time.
 - `f` — mark the selected model as the **favourite** (the `★`); it's pre-selected
   on startup. Press again to clear.
 - `Enter` or `l` — load the model. After it loads you get a *"press Enter to
@@ -96,8 +113,8 @@ and VRAM cost so you can dial it in to fit.
 - `esc` / `u` — unload the selected model.
 - `del`/`backspace` — delete the model from disk (asks to confirm; default no).
 - `o` — **`ollama pull`** a model (trending list) · `p` — model **preferences**
-  (the full configure screen) · `d` — cycle device mode (auto/cpu-only/gpu-only)
-  · `s` — settings · `r` — refresh.
+  (the full configure screen) · `d` — cycle device mode (auto/cpu-only/gpu-only;
+  fixed to `gpu-only` on unified-memory Macs) · `s` — settings · `r` — refresh.
 
   (A fresh session opens with `Enter`/`l` on a loaded model — there's no separate
   "open" key.)
@@ -132,6 +149,62 @@ has two lists, switched with `←`/`→`:
   isn't in either list.
 
 `↑`/`↓` to pick, `Enter` to pull. The download bar runs red→green as it fills.
+
+## Settings
+
+`s` opens Settings — global preferences (persisted to `config.json`). Move with
+`↑`/`↓`, change a value with `←`/`→` or `,`/`.`, run an action with `Enter`.
+
+```
+SETTINGS
+──────────────────────────────────────────────────────────────────────
+▸ Device mode             auto  ◂▸
+  Default context         64k   (new models start here)
+  Manage compaction       on   (writes the 3 settings below)
+      Auto-compact        on
+      Prune tool outputs  on
+      Compact reserve     25%  (compact at ~75% full)
+  opencode.json           ~/.config/opencode/opencode.json
+  Models folder           ~/.ollama/models   (⏎ open in file manager)
+  Flash attention         not set (daemon default)
+  KV cache type           not set (daemon default)
+  Prune derived           press ⏎ to delete unused tuicode/ models
+
+  Which memory pool drives fit estimates: auto / cpu-only / gpu-only.
+
+[↑↓] field   [←→ , .] change   [⏎] run action   [esc] back
+```
+
+A one-line hint under the rows explains whichever setting is highlighted. On a
+**unified-memory Mac**, *Device mode* reads `gpu-only  (unified — fixed)` and is
+locked (the model always runs on Metal).
+
+### Default context
+
+A global default context window. New models — and any model whose `CTX` reads
+`default` — run at this value, so you can set "**every model gets 64k**" once
+instead of per model. The moment you change a model's `CTX` in the table it
+**pins its own value** and stops following the default. Set in 4k steps;
+`default` itself is the sticky bottom stop in the `CTX` column, so you can always
+drop a model back to "follow the global default".
+
+### Compaction
+
+OpenCode keeps a long session inside the context window by **compacting** — it
+summarises (and optionally prunes) older turns as the window fills. tuicode writes
+these into `opencode.json` for you (see [opencode.json](#opencodejson)):
+
+- **Auto-compact** — summarise older turns when the window fills.
+- **Prune tool outputs** — drop earlier tool results (big file reads, command
+  output) to reclaim tokens while keeping the conversation.
+- **Compact reserve** — token headroom kept free, expressed as a % of the
+  model's context, so it *scales* with whatever `CTX` the model runs at (e.g. 25%
+  ⇒ compact at ~75% full). Only applies while Auto-compact is on.
+- **Manage compaction** (master switch) — when **off**, tuicode leaves your
+  `compaction` block completely untouched so you can hand-maintain it; when on,
+  it deep-merges the three settings above (your other compaction keys are
+  preserved). Turning auto-compact off shows a caution, since long sessions then
+  hit the hard context limit with no summarising.
 
 ## The two-layer model (read this)
 
@@ -170,14 +243,27 @@ RAM/VRAM bars. Fit estimates keep **~30% of unified memory free** for the OS,
 browser, and CPU-side work — which also tracks Metal's default ~70% GPU wired
 limit. Intel Macs fall back to RAM-based estimation (Ollama runs on CPU).
 
-**No CPU/GPU split on Apple Silicon.** A CPU/GPU split is a discrete-GPU concept:
+### No CPU/GPU split on Apple Silicon
+
+A CPU/GPU split is a discrete-GPU concept:
 overflow layers spill into *separate* system RAM when a model is bigger than VRAM.
 Unified memory is one pool, so moving a layer to the CPU saves no memory — Ollama
 runs the whole model on the GPU (Metal). The only ceiling is total memory and
 Metal's ~70% wired limit; past it, layers fall back to the CPU (slower, same
-memory) unless you raise `iogpu.wired_limit_mb`. So on M-series tuicode shows GPU
-placement (`place`), not a split; lowering the dashboard's `GPU` offload column
-only forces work onto the CPU (slower, with no memory saved).
+memory) unless you raise `iogpu.wired_limit_mb`.
+
+Because a manual split can only hurt there, on Apple Silicon tuicode **guards it
+for you**:
+
+- The dashboard `GPU` column is **blanked (`—`) and skipped** — not editable;
+  the served model always uses Ollama's auto-placement regardless of any value
+  stored from another machine.
+- **Device mode is pinned to `gpu-only`** and locked in Settings and on the `d`
+  key (the model runs on Metal; there's nothing to switch).
+- The INFO zone shows GPU placement (`place … (unified — no CPU split)`) instead
+  of a split.
+
+Tune fit with **`CTX`** (and flash-attn / KV-cache quant) instead.
 
 ## Install tuicode
 
@@ -238,7 +324,9 @@ tuicode --cpu-only      # laptops / no GPU: RAM-based estimates
 tuicode --gpu-only      # force GPU as the estimation source
 ```
 
-Device mode is sticky once set and shown in the header.
+Device mode is sticky once set and shown in the header. On **unified-memory Macs**
+it's fixed to `gpu-only` (the model runs on Metal), so the flags and the `d`/`s`
+toggles are no-ops there.
 
 ## CLI flags
 
@@ -257,9 +345,10 @@ Develop without touching real config:
 
 ## File locations
 
-- `~/.config/tuicode/config.json` — app config (device mode, default residency).
-- `~/.config/tuicode/models/<alias>.json` — per-model config (context, residency,
-  sampler preset, last OpenCode session).
+- `~/.config/tuicode/config.json` — app config (device mode, default context,
+  compaction preferences, default residency).
+- `~/.config/tuicode/models/<alias>.json` — per-model config (context, GPU
+  layers, sampler preset, last OpenCode session).
 - `~/.config/tuicode/recommended.json` — **the benchmark reference** (editable;
   see below). Seeded once from a built-in default, then never overwritten.
 - `~/.config/tuicode/trending.json` — the trending pull list. A **cache**: it's
@@ -307,16 +396,42 @@ simply warm-loading a model at 64k context doesn't stick: OpenCode's first
 request reloads it at the default (often 4096), and large prompts overflow.
 
 To pin them reliably, when a model has a non-default `CTX` or `GPU` setting,
-tuicode creates a lightweight **derived model** (`tuicode/<base>:c<ctx>g<gpu>`)
-with `num_ctx`/`num_gpu` baked into its Modelfile, loads *that*, and points
-OpenCode at it. Derived models share the base's blobs (cheap) and are hidden from
-the table. They're created on demand and reused. Unused ones are pruned
+tuicode creates a lightweight **derived model** with `num_ctx`/`num_gpu` baked
+into its Modelfile, loads *that*, and points OpenCode at it. Derived models share
+the base's blobs (cheap) and are hidden from the table. Unused ones are pruned
 automatically on quit (`q`), or on demand via **Settings → Prune derived**.
+
+The derived tag is **stable** (`tuicode/<base>:tuned`) and recreated in place
+when you change settings — *not* encoded with the values. This matters for
+**continuing a session**: OpenCode pins a resumed session to the exact model id
+it started with, so a stable tag lets `c` pick up a context/split you changed
+since (an encoded-per-value name would strand the session on its old variant).
+
+tuicode also writes a per-model **`limit`** (`{ context, output }`) = the real
+baked window, so OpenCode knows the true context — which makes auto-compaction
+trigger at the right point and the context display accurate (it can't otherwise
+infer a derived model's window).
 
 - Setting `GPU` to `cpu` (or running `--cpu-only`) bakes `num_gpu: 0`, so the
   model genuinely runs on the CPU even under OpenCode.
 - Changing `CTX`/`GPU` after a model is loaded makes `Enter`/`o` **reload** it
   with the new settings before launching OpenCode.
+
+### Compaction block
+
+When **Manage compaction** is on (Settings), tuicode also deep-merges a top-level
+`compaction` block so long sessions stay inside the window:
+
+```json
+{
+  "compaction": { "auto": true, "prune": true, "reserved": 16384 }
+}
+```
+
+`reserved` is derived from the served context (your *Compact reserve* % × the
+model's window), so it scales with whatever `CTX` the model runs at. Your own
+`compaction` keys are preserved; turn the master switch **off** to leave the
+block entirely untouched. See [Compaction](#compaction).
 
 > Keep-alive can't be pinned for OpenCode either — its `/v1` requests reset it to
 > the daemon default. tuicode loads models with a ~20 min idle keep-alive for the

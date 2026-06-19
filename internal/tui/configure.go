@@ -100,10 +100,10 @@ func (m Model) updateConfigure(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.screen = c.from
 		return m, nil
 	case "up", "k":
-		c.field = wrap(c.field-1, fldCount)
+		c.field = m.stepCfgField(-1)
 		return m, nil
 	case "down", "j", "tab":
-		c.field = wrap(c.field+1, fldCount)
+		c.field = m.stepCfgField(+1)
 		return m, nil
 	case "left", "h", ",":
 		m.adjustField(-1)
@@ -136,10 +136,33 @@ func (m *Model) adjustField(dir int) {
 		i = clamp(i+dir, 0, len(contextChoices)-1)
 		c.context = contextChoices[i]
 	case fldNumGPU:
+		if m.detection.Unified {
+			return // GPU split is locked to auto on unified memory
+		}
 		choices := m.gpuChoices(c.tag)
 		i := indexInt(choices, c.numGPU)
 		c.numGPU = choices[clamp(i+dir, 0, len(choices)-1)]
 	}
+}
+
+// cfgFieldEnabled reports whether a configure field is interactive (the GPU
+// field is locked on unified memory). stepCfgField skips disabled fields.
+func (m Model) cfgFieldEnabled(field int) bool {
+	if field == fldNumGPU && m.detection.Unified {
+		return false
+	}
+	return true
+}
+
+func (m Model) stepCfgField(dir int) int {
+	f := m.cfg.field
+	for i := 0; i < fldCount; i++ {
+		f = wrap(f+dir, fldCount)
+		if m.cfgFieldEnabled(f) {
+			return f
+		}
+	}
+	return m.cfg.field
 }
 
 func (m Model) saveConfigure() (tea.Model, tea.Cmd) {
@@ -176,6 +199,10 @@ func (m Model) viewConfigure() string {
 	b.WriteString("\n\n")
 
 	cfgForGPU := store.ModelConfig{NumGPU: c.numGPU}
+	gpuVal := numGPULabel(cfgForGPU, m.opts.DeviceMode, m.layerCount(c.tag))
+	if m.detection.Unified {
+		gpuVal = "—  (auto on unified memory)"
+	}
 	rows := []struct {
 		field int
 		label string
@@ -184,7 +211,7 @@ func (m Model) viewConfigure() string {
 		{fldPreset, "Preset", fmt.Sprintf("%s  (temp %.2f · top_p %.2f · top_k %d)",
 			store.Presets()[c.presetIdx].Name, c.params.Temperature, c.params.TopP, c.params.TopK)},
 		{fldContext, "Context", contextLabel(c.context)},
-		{fldNumGPU, "GPU layers", numGPULabel(cfgForGPU, m.opts.DeviceMode)},
+		{fldNumGPU, "GPU layers", gpuVal},
 	}
 	for _, r := range rows {
 		cursor := "  "

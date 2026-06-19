@@ -8,9 +8,33 @@ import (
 
 	"tuicode/internal/hw"
 	"tuicode/internal/server"
+	"tuicode/internal/store"
 )
 
 func runes(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
+
+func TestNumGPUShowsTotalLayers(t *testing.T) {
+	cfg := store.ModelConfig{NumGPU: 38}
+
+	// With the layer count known, an explicit offload shows "N/total".
+	if got := numGPUShort(cfg, hw.Auto, 40); got != "38/40" {
+		t.Errorf("numGPUShort = %q, want 38/40", got)
+	}
+	if got := numGPULabel(cfg, hw.Auto, 40); got != "38/40 layers" {
+		t.Errorf("numGPULabel = %q, want '38/40 layers'", got)
+	}
+	// Unknown total → bare count (no slash).
+	if got := numGPUShort(cfg, hw.Auto, 0); got != "38" {
+		t.Errorf("numGPUShort (unknown total) = %q, want 38", got)
+	}
+	// auto / cpu / all keep their words.
+	if got := numGPUShort(store.ModelConfig{NumGPU: -1}, hw.Auto, 40); got != "auto" {
+		t.Errorf("auto = %q", got)
+	}
+	if got := numGPUShort(store.ModelConfig{NumGPU: 99}, hw.Auto, 40); got != "all" {
+		t.Errorf("all = %q", got)
+	}
+}
 
 func TestManualAddTypeAndPull(t *testing.T) {
 	be := &fakeBackend{reachable: true}

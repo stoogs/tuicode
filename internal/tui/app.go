@@ -150,6 +150,11 @@ func New(opts Options) Model {
 		details: map[string]server.ModelDetails{},
 		applied: map[string]string{},
 	}
+	if m.deviceLocked() {
+		// Unified memory (Apple Silicon): the model always runs on the GPU
+		// (Metal) — cpu-only/gpu-only toggling is meaningless, so pin gpu-only.
+		m.opts.DeviceMode = hw.GPUOnly
+	}
 	switch {
 	case !opts.Deps.OK():
 		m.screen = screenPrereq
@@ -158,6 +163,12 @@ func New(opts Options) Model {
 	}
 	m.onboard = newOnboardState()
 	return m
+}
+
+// deviceLocked reports whether the device mode is fixed (unified-memory Macs run
+// on Metal/GPU; cpu-only/gpu-only toggling there is meaningless).
+func (m Model) deviceLocked() bool {
+	return m.opts.Deps.Distro.IsMac()
 }
 
 func (m Model) Init() tea.Cmd {
@@ -669,6 +680,12 @@ func (m Model) effectiveContext(cfg store.ModelConfig) int {
 func (m Model) servedConfig(tag string) store.ModelConfig {
 	cfg := m.ensureConfig(tag)
 	cfg.ContextLength = m.effectiveContext(cfg)
+	if m.detection.Unified {
+		// Unified memory (Apple Silicon): a manual CPU/GPU layer split has no
+		// memory-split benefit and forcing layers on can OOM/hang, so always let
+		// Ollama auto-place. Context is the knob to tune fit here.
+		cfg.NumGPU = store.NumGPUAuto
+	}
 	return cfg
 }
 
