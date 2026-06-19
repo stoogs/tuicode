@@ -10,6 +10,42 @@ import (
 	"tuicode/internal/server"
 )
 
+func TestSettingsViewFitsAndGroups(t *testing.T) {
+	be := &fakeBackend{reachable: true}
+	m := New(testOpts(t, be, true))
+	m.width, m.height = 100, 40
+	m.screen = screenSettings
+
+	// Device mode is the top editable row — it must always render (regression:
+	// a too-tall settings view scrolled the top off-screen).
+	out := m.viewSettings()
+	if !strings.Contains(out, "Device mode") {
+		t.Fatal("Device mode row missing from settings view")
+	}
+	// Keep the screen short so it doesn't overflow typical terminals. (The tall
+	// daemon-command block only appears on the flash/KV rows.)
+	if n := strings.Count(out, "\n"); n > 30 {
+		t.Errorf("settings view too tall: %d lines", n)
+	}
+
+	// Compaction sub-rows are indented under "Manage compaction".
+	if !strings.Contains(out, "    Auto-compact") || !strings.Contains(out, "    Prune tool outputs") {
+		t.Error("compaction sub-rows should be indented under Manage compaction")
+	}
+
+	// With management off, the sub-rows are skipped by cursor navigation.
+	m.opts.AppConfig.Compaction.Manage = false
+	m.settingsCursor = setManageCompaction
+	if next := m.stepSetting(+1); next == setCompactAuto {
+		t.Errorf("cursor should skip disabled compaction sub-rows, landed on %d", next)
+	}
+	// With management on, the next row IS the first sub-row.
+	m.opts.AppConfig.Compaction.Manage = true
+	if next := m.stepSetting(+1); next != setCompactAuto {
+		t.Errorf("with management on, next row should be Auto-compact, got %d", next)
+	}
+}
+
 func TestRowStateAndLoadingView(t *testing.T) {
 	// Force a color profile so style differences are observable in the test env,
 	// then restore it so this can't leak into other tests.

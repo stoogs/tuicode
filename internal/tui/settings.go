@@ -52,10 +52,10 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "up", "k":
-		m.settingsCursor = wrap(m.settingsCursor-1, setCount)
+		m.settingsCursor = m.stepSetting(-1)
 		return m, nil
 	case "down", "j", "tab":
-		m.settingsCursor = wrap(m.settingsCursor+1, setCount)
+		m.settingsCursor = m.stepSetting(+1)
 		return m, nil
 	case "left", "h":
 		return m.adjustSetting(-1)
@@ -63,6 +63,29 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.adjustSetting(+1)
 	}
 	return m, nil
+}
+
+// settingEnabled reports whether a setting row is interactive. The compaction
+// sub-settings are disabled (skipped, greyed) while "Manage compaction" is off,
+// since they wouldn't be written.
+func (m Model) settingEnabled(idx int) bool {
+	switch idx {
+	case setCompactAuto, setCompactPrune, setReservePct:
+		return m.opts.AppConfig.Compaction.Manage
+	}
+	return true
+}
+
+// stepSetting moves the cursor by dir, wrapping and skipping disabled rows.
+func (m Model) stepSetting(dir int) int {
+	cur := m.settingsCursor
+	for i := 0; i < setCount; i++ {
+		cur = wrap(cur+dir, setCount)
+		if m.settingEnabled(cur) {
+			return cur
+		}
+	}
+	return m.settingsCursor
 }
 
 func (m Model) adjustSetting(dir int) (tea.Model, tea.Cmd) {
@@ -139,9 +162,9 @@ func (m Model) viewSettings() string {
 		{setDevice, "Device mode", string(m.opts.DeviceMode), true},
 		{setDefaultContext, "Default context", ctxDefaultLabel(m.opts.AppConfig.DefaultContext), true},
 		{setManageCompaction, "Manage compaction", manageLabel(m.opts.AppConfig.Compaction.Manage), true},
-		{setCompactAuto, "Auto-compact", compactSub(onOff(c.Auto), c.Manage), true},
-		{setCompactPrune, "Prune tool outputs", compactSub(onOff(c.Prune), c.Manage), true},
-		{setReservePct, "Compact reserve", compactSub(reserveLabel(c.ReservePct), c.Manage), true},
+		{setCompactAuto, "    Auto-compact", onOff(c.Auto), true},
+		{setCompactPrune, "    Prune tool outputs", onOff(c.Prune), true},
+		{setReservePct, "    Compact reserve", reserveLabel(c.ReservePct), true},
 		{setOpencodeJSON, "opencode.json", m.opts.OpencodeJSON, false},
 		{setOllamaModels, "Models folder", ollamaModelsDir() + "   (⏎ open in file manager)", false},
 		{setFlashAttn, "Flash attention", envStatus("OLLAMA_FLASH_ATTENTION"), false},
@@ -150,9 +173,14 @@ func (m Model) viewSettings() string {
 	}
 	for _, r := range rows {
 		cursor := "  "
-		label := padRight(r.label, 20)
+		label := padRight(r.label, 24)
 		val := r.value
-		if r.idx == m.settingsCursor {
+		switch {
+		case !m.settingEnabled(r.idx):
+			// Disabled compaction sub-setting: greyed and not selectable.
+			label = mutedStyle.Render(label)
+			val = mutedStyle.Render(val)
+		case r.idx == m.settingsCursor:
 			cursor = accentStyle.Render("▸ ")
 			label = accentStyle.Render(label)
 			if r.edit {
@@ -160,65 +188,44 @@ func (m Model) viewSettings() string {
 			} else {
 				val = selectedStyle.Render(val)
 			}
-		} else if !r.edit {
+		case !r.edit:
 			val = mutedStyle.Render(val)
 		}
 		b.WriteString(cursor + label + val + "\n")
-		// Visually group the compaction block away from the paths/env below.
-		if r.idx == setReservePct {
+	}
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render(m.settingHelp()))
+	b.WriteString("\n\n")
+	// The daemon-env commands are tall, so only show them when the flash-attn or
+	// KV-cache row is highlighted (keeps the screen short the rest of the time).
+	if m.settingsCursor == setFlashAttn || m.settingsCursor == setKVCache {
+		d := m.opts.Deps.Distro
+		b.WriteString(mutedStyle.Render("Read by the Ollama daemon at startup — set on the daemon, then restart it:"))
+		b.WriteString("\n")
+		if d.IsMac() {
+			// Per-var launchctl; the menu-bar app reads these on (re)launch. KV-cache
+			// quant is ignored unless flash-attn is on, so that one comes first.
+			b.WriteString("  " + accentStyle.Render("launchctl setenv OLLAMA_FLASH_ATTENTION 1") + mutedStyle.Render("     ← set this first"))
+			b.WriteString("\n")
+			b.WriteString("  " + accentStyle.Render("launchctl setenv OLLAMA_KV_CACHE_TYPE q8_0") + mutedStyle.Render("    ← needs flash-attn on"))
+			b.WriteString("\n")
+		} else {
+			// One systemd override sets both at once (so flash-attn is already on).
+			b.WriteString("  " + accentStyle.Render("sudo systemctl edit ollama") + mutedStyle.Render("   →   [Service]"))
+			b.WriteString("\n")
+			b.WriteString(mutedStyle.Render(`    Environment="OLLAMA_FLASH_ATTENTION=1" "OLLAMA_KV_CACHE_TYPE=q8_0"`))
 			b.WriteString("\n")
 		}
-	}
-	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("Compaction keeps long OpenCode sessions inside the context window:"))
-	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("  • Auto-compact — summarise older turns when the window fills."))
-	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("  • Prune tool outputs — drop earlier tool results (big file reads, command"))
-	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("    output) to reclaim tokens while keeping the conversation."))
-	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("  • Reserve — headroom kept free; scales with the model's context."))
-	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("Written (deep-merged) to opencode.json on the next launch — no restart."))
-	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("Turn off 'Manage compaction' to hand-maintain that block yourself."))
-	b.WriteString("\n\n")
-	d := m.opts.Deps.Distro
-	b.WriteString(mutedStyle.Render("OLLAMA_MODELS / flash-attn / KV-cache are read by the Ollama daemon at startup —"))
-	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("restarting tuicode won't apply them (it's just a client). The values above are"))
-	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("read-only here; set them on the daemon, then restart Ollama:"))
-	b.WriteString("\n")
-	if d.IsMac() {
-		// Per-var launchctl; the menu-bar app reads these on (re)launch. KV-cache
-		// quant is ignored unless flash-attn is on, so that one comes first.
-		b.WriteString("  " + accentStyle.Render("launchctl setenv OLLAMA_FLASH_ATTENTION 1") + mutedStyle.Render("     ← set this first"))
+		b.WriteString("  " + mutedStyle.Render("restart: ") + accentStyle.Render(d.DaemonRestartCmd()))
 		b.WriteString("\n")
-		b.WriteString("  " + accentStyle.Render("launchctl setenv OLLAMA_KV_CACHE_TYPE q8_0") + mutedStyle.Render("    ← needs flash-attn on"))
-		b.WriteString("\n")
-	} else {
-		// One systemd override sets both at once (so flash-attn is already on).
-		b.WriteString("  " + accentStyle.Render("sudo systemctl edit ollama") + mutedStyle.Render("   →   [Service]"))
-		b.WriteString("\n")
-		b.WriteString(mutedStyle.Render(`    Environment="OLLAMA_FLASH_ATTENTION=1" "OLLAMA_KV_CACHE_TYPE=q8_0"`))
+		mem := "context VRAM"
+		if m.detection.Unified {
+			mem = "context memory"
+		}
+		b.WriteString(mutedStyle.Render("  flash-attn + KV-cache q8_0/q4_0 ≈ half/quarter the " + mem + "."))
 		b.WriteString("\n")
 	}
-	b.WriteString("  " + mutedStyle.Render("restart: ") + accentStyle.Render(d.DaemonRestartCmd()))
 	b.WriteString("\n")
-	mem := "context VRAM"
-	tail := "  context. Per-model GPU layers: the GPU column."
-	if m.detection.Unified {
-		// Apple Silicon: KV cache lives in unified memory, and the GPU column only
-		// hurts (no memory split).
-		mem = "context memory"
-		tail = "  context in unified memory (the GPU column doesn't help)."
-	}
-	b.WriteString(mutedStyle.Render("  Flash-attn + KV-cache q8_0/q4_0 ≈ half/quarter the " + mem + " — fits larger"))
-	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render(tail))
-	b.WriteString("\n\n")
 
 	if sl := m.statusLine(); sl != "" {
 		b.WriteString(sl + "\n\n")
@@ -283,18 +290,32 @@ func onOff(b bool) string {
 // manageLabel describes the compaction master switch.
 func manageLabel(manage bool) string {
 	if manage {
-		return "on   (tuicode merges its keys)"
+		return "on   (writes the 3 settings below)"
 	}
 	return "off  (your block left untouched)"
 }
 
-// compactSub annotates a sub-setting that has no effect while compaction
-// management is off (it isn't written to opencode.json).
-func compactSub(val string, manage bool) string {
-	if !manage {
-		return val + "   (disabled)"
+// settingHelp returns a one-line hint for the highlighted setting, so the screen
+// stays short instead of carrying a tall static help block.
+func (m Model) settingHelp() string {
+	switch m.settingsCursor {
+	case setDevice:
+		return "Which memory pool drives fit estimates: auto / cpu-only / gpu-only."
+	case setDefaultContext:
+		return "Seeds new models; each keeps its own value once you change its CTX."
+	case setManageCompaction:
+		return "On: writes auto/prune/reserve to opencode.json (merged). Off: hand-maintain."
+	case setCompactAuto:
+		return "OpenCode summarises older turns when the context window fills."
+	case setCompactPrune:
+		return "Drops earlier tool results (file reads, command output) to reclaim tokens."
+	case setReservePct:
+		return "Tokens of headroom kept free; scales with context. Applies on next launch."
+	case setFlashAttn, setKVCache:
+		return "Daemon env var (read-only here) — set it on Ollama and restart, see below."
+	default:
+		return "Compaction/context settings apply to opencode.json on next launch — no restart."
 	}
-	return val
 }
 
 // ctxDefaultLabel renders the global default-context value (0 = each model uses
