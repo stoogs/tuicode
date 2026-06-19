@@ -201,7 +201,7 @@ func (m Model) cycleDevice() (tea.Model, tea.Cmd) {
 // context/GPU via a derived model. It unloads every other resident model, then
 // creates (if needed) and loads the serve tag.
 func (m Model) doLoad(base string) (tea.Model, tea.Cmd) {
-	cfg := m.ensureConfig(base)
+	cfg := m.servedConfig(base)
 	mode := m.opts.DeviceMode
 	serve := serveTag(base, cfg, mode)
 	keepAlive := cfg.Residency.KeepAlive()
@@ -265,7 +265,9 @@ func (m Model) adjustColumn(dir int) (tea.Model, tea.Cmd) {
 	cfg := m.ensureConfig(tag)
 	switch m.dashCol {
 	case colContext:
-		i := indexInt(contextChoices, cfg.ContextLength)
+		// Step from the effective value so a model following the global default
+		// nudges up/down from there; stepping back to 0 follows the default again.
+		i := indexInt(contextChoices, m.effectiveContext(cfg))
 		cfg.ContextLength = contextChoices[clamp(i+dir, 0, len(contextChoices)-1)]
 		m.status = tag + " context → " + contextLabel(cfg.ContextLength)
 	case colNumGPU:

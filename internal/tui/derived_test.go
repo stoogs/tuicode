@@ -39,6 +39,81 @@ func TestServeTagDerivation(t *testing.T) {
 	}
 }
 
+func TestGlobalDefaultContextFollows(t *testing.T) {
+	be := &fakeBackend{reachable: true, disk: []server.DiskModel{{Tag: "a:1b", Size: gib}}}
+	m := New(testOpts(t, be, true))
+	m.disk = be.disk
+	base := "a:1b"
+
+	// No per-model context, no global default → auto (no derived).
+	if got := m.effectiveContext(m.ensureConfig(base)); got != 0 {
+		t.Errorf("effectiveContext = %d, want 0 (auto)", got)
+	}
+
+	// A global default → an un-set model follows it (and now needs a derived model).
+	m.opts.AppConfig.DefaultContext = 32768
+	if got := m.effectiveContext(m.ensureConfig(base)); got != 32768 {
+		t.Errorf("effectiveContext = %d, want 32768 (follows global)", got)
+	}
+	if got := m.servedConfig(base); got.ContextLength != 32768 {
+		t.Errorf("servedConfig ctx = %d, want 32768", got.ContextLength)
+	}
+	if !needsDerived(m.servedConfig(base), hw.Auto) {
+		t.Error("a model following a 32k global default should need a derived model")
+	}
+
+	// An explicit per-model context overrides the global default.
+	cfg := m.ensureConfig(base)
+	cfg.ContextLength = 16384
+	m.configs[base] = cfg
+	if got := m.effectiveContext(m.ensureConfig(base)); got != 16384 {
+		t.Errorf("effectiveContext = %d, want 16384 (per-model override)", got)
+	}
+}
+
+func TestLaunchWritesLimitAndCompaction(t *testing.T) {
+	base := "a:1b"
+	be := &fakeBackend{reachable: true, disk: []server.DiskModel{{Tag: base, Size: gib}}}
+	opts := testOpts(t, be, true)
+	m := New(opts)
+	m.disk = be.disk
+	m.opts.AppConfig.DefaultContext = 32768 // global default; the model follows it
+
+	m.execOpenCodeSession(base, "") // writes opencode.json as a side effect
+
+	data, err := os.ReadFile(opts.OpencodeJSON)
+	if err != nil {
+		t.Fatalf("opencode.json not written: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	// compaction block: reserved = 25% of 32768 = 8192.
+	comp, ok := doc["compaction"].(map[string]any)
+	if !ok {
+		t.Fatalf("no compaction block: %v", doc)
+	}
+	if comp["auto"] != true || comp["prune"] != true {
+		t.Errorf("compaction toggles = %v", comp)
+	}
+	if comp["reserved"].(float64) != 8192 {
+		t.Errorf("reserved = %v, want 8192 (25%% of 32k)", comp["reserved"])
+	}
+
+	// per-model limit.context = the followed 32k window.
+	serve := serveTag(base, m.servedConfig(base), hw.Auto)
+	entry := doc["provider"].(map[string]any)["ollama"].(map[string]any)["models"].(map[string]any)[serve].(map[string]any)
+	limit, ok := entry["limit"].(map[string]any)
+	if !ok {
+		t.Fatalf("no limit on entry %q: %v", serve, entry)
+	}
+	if limit["context"].(float64) != 32768 {
+		t.Errorf("limit.context = %v, want 32768", limit["context"])
+	}
+}
+
 func TestLoadCreatesDerivedForContext(t *testing.T) {
 	be := &fakeBackend{reachable: true,
 		disk: []server.DiskModel{{Tag: "deepseek-r1:14b", Size: 9 * gib, ParamSize: "14B", Quant: "Q4_K_M"}},

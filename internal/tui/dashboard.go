@@ -241,7 +241,7 @@ func spanRow(content string) string {
 // loaded, yellow while loading, red while stopping/deleting — so there's no need
 // for a separate status column.
 func (m Model) renderRow(i int, dm server.DiskModel) string {
-	cfg := m.ensureConfig(dm.Tag)
+	cfg := m.servedConfig(dm.Tag)
 	lm, _, loaded := m.loadedFor(dm.Tag)
 	selected := i == m.dashCursor
 
@@ -463,7 +463,7 @@ func (m Model) renderInfo() string {
 		return m.renderLoadingInfo(tag)
 	}
 
-	cfg := m.ensureConfig(tag)
+	cfg := m.servedConfig(tag)
 	usage := m.usageFor(tag, cfg.ContextLength)
 
 	mem := m.detection.Authoritative()
@@ -621,7 +621,7 @@ func (m Model) splitLine(tag string, lm server.LoadedModel, loaded bool) string 
 // you dial the `GPU` column in and see the likely outcome live. ok=false when we
 // lack the layer count or a usable footprint estimate.
 func (m Model) predictSplit(tag string) (string, bool) {
-	cfg := m.ensureConfig(tag)
+	cfg := m.servedConfig(tag)
 	u := m.usageFor(tag, cfg.ContextLength)
 	if !u.Known || u.TotalGB <= 0 {
 		return "", false
@@ -919,7 +919,7 @@ func (m Model) selectedProjectionGB() float64 {
 	if _, _, loaded := m.loadedFor(tag); loaded {
 		return 0
 	}
-	u := m.usageFor(tag, m.ensureConfig(tag).ContextLength)
+	u := m.usageFor(tag, m.servedConfig(tag).ContextLength)
 	if !u.Known {
 		return 0
 	}

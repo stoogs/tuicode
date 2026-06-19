@@ -91,6 +91,79 @@ func TestMarshalIdempotent(t *testing.T) {
 	}
 }
 
+func TestMergeWritesModelLimit(t *testing.T) {
+	doc := minimalDoc()
+	MergeOllama(doc, []ModelEntry{{Tag: "tuicode/x:tuned", DisplayName: "X (ctx 32k)", Context: 32768, Output: 8192}})
+	out, _ := Marshal(doc)
+	var rt map[string]any
+	if err := json.Unmarshal(out, &rt); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	models := rt["provider"].(map[string]any)["ollama"].(map[string]any)["models"].(map[string]any)
+	entry := models["tuicode/x:tuned"].(map[string]any)
+	limit, ok := entry["limit"].(map[string]any)
+	if !ok {
+		t.Fatalf("limit not written: %v", entry)
+	}
+	if limit["context"].(float64) != 32768 || limit["output"].(float64) != 8192 {
+		t.Errorf("limit = %v, want context 32768 / output 8192", limit)
+	}
+
+	// A zero context must NOT write a limit block.
+	doc2 := minimalDoc()
+	MergeOllama(doc2, []ModelEntry{{Tag: "y:1b", DisplayName: "Y"}})
+	out2, _ := Marshal(doc2)
+	if json.Valid(out2) {
+		var rt2 map[string]any
+		json.Unmarshal(out2, &rt2)
+		e := rt2["provider"].(map[string]any)["ollama"].(map[string]any)["models"].(map[string]any)["y:1b"].(map[string]any)
+		if _, has := e["limit"]; has {
+			t.Errorf("limit should be omitted for zero context: %v", e)
+		}
+	}
+}
+
+func TestWriteCompactionBlockIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "opencode.json")
+	clock := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	mk := func() *Writer {
+		return &Writer{
+			BackupDir:    filepath.Join(dir, "backups"),
+			Keep:         10,
+			DefaultModel: "tuicode/x:tuned",
+			Compaction:   map[string]any{"auto": true, "prune": true, "reserved": 8192},
+			Now:          func() time.Time { clock = clock.Add(time.Second); return clock },
+		}
+	}
+	models := []ModelEntry{{Tag: "tuicode/x:tuned", DisplayName: "X (ctx 32k)", Context: 32768, Output: 8192}}
+
+	if _, err := mk().Write(path, models); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	comp, ok := doc["compaction"].(map[string]any)
+	if !ok {
+		t.Fatalf("compaction block not written: %v", doc)
+	}
+	if comp["auto"] != true || comp["prune"] != true || comp["reserved"].(float64) != 8192 {
+		t.Errorf("compaction = %v", comp)
+	}
+
+	// Second write with identical inputs must be a no-op (idempotent).
+	res, err := mk().Write(path, models)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Changed {
+		t.Error("second write changed the file; compaction/limit not idempotent")
+	}
+}
+
 func TestWriteIdempotentNoBackupSpam(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "opencode.json")

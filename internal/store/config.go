@@ -61,6 +61,22 @@ type AppConfig struct {
 	WorkingDir       string    `json:"working_dir,omitempty"`      // dir to launch OpenCode in
 	Favourite        string    `json:"favourite,omitempty"`        // model tag selected by default on startup
 	TrendingFetched  int64     `json:"trending_fetched,omitempty"` // unix secs of last trending refresh
+	// DefaultContext is the global default context (num_ctx) a model uses when
+	// its own context is 0 ("follow the global default"). 0 = auto (model
+	// default). Set/changed in 4k increments in Settings.
+	DefaultContext int `json:"default_context,omitempty"`
+	// Compaction controls OpenCode's conversation-compaction behavior.
+	Compaction Compaction `json:"compaction"`
+}
+
+// Compaction mirrors OpenCode's top-level "compaction" config, written into
+// opencode.json on launch. It keeps a long session usable within the context
+// window: OpenCode summarizes (and optionally prunes) older messages as the
+// window fills, leaving `reserved` tokens of headroom.
+type Compaction struct {
+	Auto       bool `json:"auto"`        // auto-summarize when the window fills
+	Prune      bool `json:"prune"`       // drop old tool outputs to save tokens
+	ReservePct int  `json:"reserve_pct"` // headroom reserved as a % of the context window (→ compaction triggers earlier)
 }
 
 // DefaultAppConfig returns sane defaults.
@@ -68,6 +84,7 @@ func DefaultAppConfig() AppConfig {
 	return AppConfig{
 		DeviceMode:       "auto",
 		DefaultResidency: DefaultResidency(),
+		Compaction:       Compaction{Auto: true, Prune: true, ReservePct: 25},
 	}
 }
 

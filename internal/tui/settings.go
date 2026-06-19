@@ -3,6 +3,7 @@ package tui
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -12,6 +13,10 @@ import (
 
 const (
 	setDevice = iota
+	setDefaultContext
+	setCompactAuto
+	setCompactPrune
+	setReservePct
 	setOpencodeJSON
 	setOllamaModels
 	setFlashAttn
@@ -19,6 +24,9 @@ const (
 	setPrune
 	setCount
 )
+
+// reservePctChoices are the selectable compaction-reserve percentages.
+var reservePctChoices = []int{0, 10, 15, 20, 25, 30, 40, 50}
 
 func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
@@ -71,6 +79,23 @@ func (m Model) adjustSetting(dir int) (tea.Model, tea.Cmd) {
 		m.persistAppConfig()
 		// Re-detect with the new mode immediately.
 		return m, m.pollCmd()
+	case setDefaultContext:
+		i := indexInt(contextChoices, m.opts.AppConfig.DefaultContext)
+		m.opts.AppConfig.DefaultContext = contextChoices[clamp(i+dir, 0, len(contextChoices)-1)]
+		m.persistAppConfig()
+	case setCompactAuto:
+		m.opts.AppConfig.Compaction.Auto = !m.opts.AppConfig.Compaction.Auto
+		m.persistAppConfig()
+	case setCompactPrune:
+		m.opts.AppConfig.Compaction.Prune = !m.opts.AppConfig.Compaction.Prune
+		m.persistAppConfig()
+	case setReservePct:
+		i := indexInt(reservePctChoices, m.opts.AppConfig.Compaction.ReservePct)
+		if i < 0 {
+			i = indexInt(reservePctChoices, 25) // snap an off-list value to the default
+		}
+		m.opts.AppConfig.Compaction.ReservePct = reservePctChoices[clamp(i+dir, 0, len(reservePctChoices)-1)]
+		m.persistAppConfig()
 	}
 	return m, nil
 }
@@ -107,6 +132,10 @@ func (m Model) viewSettings() string {
 		edit  bool
 	}{
 		{setDevice, "Device mode", string(m.opts.DeviceMode), true},
+		{setDefaultContext, "Default context", ctxDefaultLabel(m.opts.AppConfig.DefaultContext), true},
+		{setCompactAuto, "Auto-compact", onOff(m.opts.AppConfig.Compaction.Auto), true},
+		{setCompactPrune, "Prune tool outputs", onOff(m.opts.AppConfig.Compaction.Prune), true},
+		{setReservePct, "Compact reserve", reserveLabel(m.opts.AppConfig.Compaction.ReservePct), true},
 		{setOpencodeJSON, "opencode.json", m.opts.OpencodeJSON, false},
 		{setOllamaModels, "Models folder", ollamaModelsDir() + "   (⏎ open in file manager)", false},
 		{setFlashAttn, "Flash attention", envStatus("OLLAMA_FLASH_ATTENTION"), false},
@@ -131,6 +160,12 @@ func (m Model) viewSettings() string {
 		b.WriteString(cursor + label + val + "\n")
 	}
 	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render("Default context seeds new models (each keeps its own once you change its CTX)."))
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render("Auto-compact/prune/reserve are written to opencode.json so long sessions stay"))
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render("inside the window — reserve scales with the context the model runs at."))
+	b.WriteString("\n\n")
 	d := m.opts.Deps.Distro
 	b.WriteString(mutedStyle.Render("OLLAMA_MODELS / flash-attn / KV-cache are read by the Ollama daemon at startup —"))
 	b.WriteString("\n")
@@ -218,4 +253,28 @@ func padRight(s string, n int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", n-len(s))
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
+}
+
+// ctxDefaultLabel renders the global default-context value (0 = each model uses
+// its own default).
+func ctxDefaultLabel(ctx int) string {
+	if ctx <= 0 {
+		return "auto (per-model default)"
+	}
+	return contextShort(ctx) + "   (new models start here)"
+}
+
+// reserveLabel renders the compaction-reserve percentage.
+func reserveLabel(pct int) string {
+	if pct <= 0 {
+		return "off (OpenCode default headroom)"
+	}
+	return strconv.Itoa(pct) + "% of context   (compact at ~" + strconv.Itoa(100-pct) + "% full)"
 }
